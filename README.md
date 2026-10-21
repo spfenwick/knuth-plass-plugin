@@ -41,10 +41,28 @@ KOReader. The settings are under top menu → Typeset (the document menu) →
 | Hyphen penalties | `crengine.style.justify.hyphen.penalty`, `.explicit.hyphen.penalty` | 0 / 0 |
 | Repeated-hyphen penalties | `crengine.style.justify.double.hyphen.demerits`, `.final.hyphen.demerits` | 0 / 0 |
 
-When no line breaking for a paragraph fits within the tolerances and the
-emergency stretch, that paragraph is broken greedily. This happens more
-often with large fonts on narrow screens; raising "Emergency" stretch (for
-example to 10%) or "Max +" word spacing lets more paragraphs use Knuth–Plass.
+When no layout of a paragraph fits within the tolerances and the emergency
+stretch, the engine makes a last pass that accepts looser lines, so the
+paragraph still uses Knuth–Plass. Only a paragraph with a word wider than
+the line falls back to greedy breaking. (Engines before this last pass was
+added broke such paragraphs greedily, which with large fonts on narrow
+screens was about half of them, and then none of these settings applied.)
+
+The hyphen penalties only choose between layouts that fit the word-space
+limits; where a line cannot be filled without breaking a word, the hyphen
+stays. Measured on a long non-fiction book at 22px on a 600px-wide screen
+with the default word-space limits:
+
+| Hyphen penalty | Hyphenated lines |
+| --- | --- |
+| 0 (free) | 25.9% |
+| 1000 (light) | 18.3% |
+| 3000 (moderate) | 11.4% |
+| 10000 (strong) | 7.6% |
+
+Repeated-hyphen demerits of 1000000 / 3000000 / 10000000 cut consecutive
+hyphenated line pairs by about half / two thirds / three quarters. Values
+much below these presets have little visible effect.
 
 ## Tests
 
