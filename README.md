@@ -12,8 +12,11 @@ With a stock engine the plugin stays inactive and the menu entry shows
 ## Install
 
 Copy `knuthplass.koplugin` into KOReader's `plugins/` folder and restart
-KOReader. The settings are under top menu → Typeset (the document menu) →
-"Line breaking".
+KOReader. Top menu → Typeset (the document menu) → "Line breaking" opens a
+dialog with all the settings in one place. Each setting has a row of
+presets, with the current one highlighted, and "…" for a custom value. Tap
+a setting's name for an explanation. The dialog can also be assigned to a
+gesture ("Knuth–Plass justification settings").
 
 ## How settings are stored
 
@@ -63,6 +66,22 @@ with the default word-space limits:
 Repeated-hyphen demerits of 1000000 / 3000000 / 10000000 cut consecutive
 hyphenated line pairs by about half / two thirds / three quarters. Values
 much below these presets have little visible effect.
+
+Ending minimum is a preference, not a rule: its cost grows with the square
+of how far the final line falls short, and it only chooses between layouts
+that fit the limits above. Same book and screen, paragraphs of two or more
+lines:
+
+| Ending minimum | Endings under 33% | Endings of 66% or more |
+| --- | --- | --- |
+| 0% | 16.9% | 64.7% |
+| 33% (default) | 6.6% | 69.0% |
+| 50% | 4.7% | 69.0% |
+| 66% | 5.1% | 76.8% |
+| 80% | 5.0% | 85.2% |
+
+(Engines before this change used a flat cost that was too weak to move most
+endings, and above about 33% it made no visible difference.)
 
 ## Tests
 

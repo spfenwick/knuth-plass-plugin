@@ -169,7 +169,7 @@ Only used with best kerning (HarfBuzz).]]),
         left_text = _("Emergency"), left_min = 0, left_max = 100, left_step = 1, left_hold_step = 5,
         right_text = _("Ending min"), right_min = 0, right_max = 100, right_step = 1, right_hold_step = 5,
         unit = "%",
-        info = _([[Emergency stretch is extra flexibility, as a percentage of the line width, used only when the normal pass cannot find a solution. Ending minimum prefers a final line at least this percentage of the line width.]]),
+        info = _([[Emergency stretch is extra flexibility, as a percentage of the line width, used only when the normal pass cannot find a solution. Ending minimum prefers a final line at least this percentage of the line width. The shorter the final line, the stronger the preference, but it only chooses between layouts that fit the word-space limits and tolerances, so some paragraphs (short ones especially) keep a short ending.]]),
     },
     {
         name = "justification_hyphen_penalty",
@@ -286,6 +286,13 @@ function KnuthPlass:onDispatcherRegisterActions()
             rolling = true,
         })
     end
+    Dispatcher:registerAction("knuth_plass_dialog", {
+        category = "none",
+        event = "ShowKnuthPlassDialog",
+        title = _("Knuth–Plass justification settings"),
+        rolling = true,
+        separator = true,
+    })
 end
 
 function KnuthPlass:engineSupported()
@@ -386,6 +393,7 @@ function KnuthPlass:setValue(name, value, quiet)
     if not quiet then
         Notification:notify(T(_("%1: %2"), option.title, formatValue(option, value)))
     end
+    self:refreshDialog()
     return true
 end
 
@@ -419,7 +427,7 @@ function KnuthPlass:showPairWidget(option)
         unit = option.unit,
         keep_shown_on_apply = true,
         callback = function(left, right)
-            self:setValue(option.name, { left, right })
+            self:setValue(option.name, { left, right }, true)
         end,
         extra_text = _("Set as default"),
         extra_callback = function(left, right)
@@ -442,7 +450,7 @@ function KnuthPlass:showSingleWidget(option)
         default_value = option.default,
         keep_shown_on_apply = true,
         callback = function(widget)
-            self:setValue(option.name, widget.value)
+            self:setValue(option.name, widget.value, true)
         end,
         extra_text = _("Set as default"),
         extra_callback = function(widget)
@@ -456,78 +464,120 @@ function KnuthPlass:showInfo(option)
     UIManager:show(InfoMessage:new{ text = option.info })
 end
 
-function KnuthPlass:getOptionMenu(option)
-    local menu = {}
-    for i, preset in ipairs(option.values) do
-        table.insert(menu, {
-            text = option.labels[i],
-            radio = true,
-            checked_func = function()
-                return same(self.values[option.name], preset)
-            end,
-            callback = function()
-                self:setValue(option.name, preset)
-            end,
-            hold_callback = function()
-                self:makeDefault(option.name, preset)
-            end,
-        })
+local function isPreset(option, value)
+    for _i, preset in ipairs(option.values) do
+        if same(preset, value) then
+            return true
+        end
     end
-    if option.left_text or option.value_min then
-        table.insert(menu, {
-            text_func = function()
-                return T(_("Custom… (%1)"), formatValue(option, self.values[option.name]))
-            end,
-            callback = function()
-                if type(option.default) == "table" then
-                    self:showPairWidget(option)
-                else
-                    self:showSingleWidget(option)
-                end
-            end,
-        })
-    end
-    menu[#menu].separator = true
-    if option.info then
-        table.insert(menu, {
-            text = _("About this setting"),
-            keep_menu_open = true,
-            callback = function()
-                self:showInfo(option)
-            end,
-        })
-    end
-    return menu
+    return false
 end
 
-function KnuthPlass:getMenuTable()
-    local menu = {}
+-- All rows use the same face and size so they have the same height, which
+-- the dialog's page-by-page scrolling relies on.
+local DIALOG_FONT_SIZE = 18
+
+-- The dialog's rows: for each setting, its name (tap for an explanation),
+-- then its presets with the current one highlighted, then "…" for a custom
+-- value.
+function KnuthPlass:getDialogButtons()
+    local Blitbuffer = require("ffi/blitbuffer")
+    local rows = {}
     for _i, option in ipairs(options) do
-        local item = {
-            text_func = function()
-                return T(_("%1: %2"), option.title, formatValue(option, self.values[option.name]))
-            end,
-            sub_item_table_func = function()
-                return self:getOptionMenu(option)
-            end,
-        }
-        if option.enabled_func then
-            item.enabled_func = function()
-                return option.enabled_func(self)
-            end
+        local value = self.values[option.name]
+        local enabled = not option.enabled_func or option.enabled_func(self)
+        local heading = option.title
+        if not isPreset(option, value) then
+            heading = T(_("%1: %2 (custom)"), option.title, formatValue(option, value))
         end
-        -- Group: mode, spacing, line quality, then hyphenation.
-        item.separator = option.name == "line_breaking_mode"
-            or option.name == "justification_tracking_smoothness"
-            or option.name == "justification_line_limits"
-            or option.name == "justification_hyphen_demerits"
-        table.insert(menu, item)
+        table.insert(rows, {
+            {
+                text = heading,
+                align = "left",
+                font_size = DIALOG_FONT_SIZE,
+                font_bold = false,
+                callback = function()
+                    self:showInfo(option)
+                end,
+            },
+        })
+        local presets = {}
+        for i, preset in ipairs(option.values) do
+            local selected = same(value, preset)
+            table.insert(presets, {
+                text = option.labels[i],
+                font_size = DIALOG_FONT_SIZE,
+                font_bold = selected,
+                background = selected and Blitbuffer.COLOR_LIGHT_GRAY or nil,
+                enabled = enabled,
+                callback = function()
+                    self:setValue(option.name, preset, true)
+                end,
+                hold_callback = function()
+                    self:makeDefault(option.name, preset)
+                end,
+            })
+        end
+        if option.left_text or option.value_min then
+            local custom = not isPreset(option, value)
+            table.insert(presets, {
+                text = "…",
+                font_size = DIALOG_FONT_SIZE,
+                font_bold = custom,
+                background = custom and Blitbuffer.COLOR_LIGHT_GRAY or nil,
+                enabled = enabled,
+                callback = function()
+                    if type(option.default) == "table" then
+                        self:showPairWidget(option)
+                    else
+                        self:showSingleWidget(option)
+                    end
+                end,
+            })
+        end
+        table.insert(rows, presets)
     end
-    table.insert(menu, {
-        text = _("Long-press a preset to make it the default for new books."),
-        enabled = false,
+    table.insert(rows, {
+        {
+            text = _("Tap a name for help. Long-press a preset to make it the default for new books."),
+            font_size = DIALOG_FONT_SIZE,
+            font_bold = false,
+            enabled = false,
+            callback = function() end,
+        },
     })
-    return menu
+    return rows
+end
+
+function KnuthPlass:showDialog()
+    if not self.active then return end
+    local ButtonDialog = require("ui/widget/buttondialog")
+    self.dialog = ButtonDialog:new{
+        title = _("Knuth–Plass justification"),
+        use_info_style = false,
+        buttons = self:getDialogButtons(),
+        width_factor = 0.95,
+        tap_close_callback = function()
+            self.dialog = nil
+        end,
+    }
+    UIManager:show(self.dialog)
+end
+
+-- Rebuild the open dialog after a change, keeping its scroll position.
+function KnuthPlass:refreshDialog()
+    local dialog = self.dialog
+    if not dialog then return end
+    local offset = dialog:getScrolledOffset()
+    dialog.buttons = self:getDialogButtons()
+    dialog:reinit()
+    dialog:setScrolledOffset(offset)
+    UIManager:setDirty("all", "ui")
+end
+
+function KnuthPlass:onShowKnuthPlassDialog()
+    self:showDialog()
+    return true
 end
 
 function KnuthPlass:addToMainMenu(menu_items)
@@ -543,8 +593,11 @@ function KnuthPlass:addToMainMenu(menu_items)
         enabled_func = function()
             return self.active
         end,
-        sub_item_table_func = function()
-            return self:getMenuTable()
+        callback = function(touchmenu_instance)
+            if touchmenu_instance then
+                touchmenu_instance:closeMenu()
+            end
+            self:showDialog()
         end,
     }
 end

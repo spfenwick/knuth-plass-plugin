@@ -21,7 +21,21 @@ stub("ui/widget/notification", {
         table.insert(notifications, text)
     end,
 })
-stub("ui/uimanager", { show = function() end })
+local shown = {}
+stub("ui/uimanager", {
+    show = function(_, widget) table.insert(shown, widget) end,
+    setDirty = function() end,
+})
+stub("ffi/blitbuffer", { COLOR_LIGHT_GRAY = "lightgray" })
+local ButtonDialog = {}
+function ButtonDialog:new(o)
+    o.reinits = 0
+    return setmetatable(o, { __index = self })
+end
+function ButtonDialog:reinit() self.reinits = self.reinits + 1 end
+function ButtonDialog:getScrolledOffset() return "offset" end
+function ButtonDialog:setScrolledOffset(offset) self.offset = offset end
+stub("ui/widget/buttondialog", ButtonDialog)
 stub("logger", { info = function() end, dbg = function() end })
 stub("ffi/util", {
     template = function(fmt, ...)
@@ -185,25 +199,59 @@ do
     assert(equals(G_reader_settings.store.copt_justification_hyphen_penalty, { 50, 50 }))
     assert(ui.doc_settings.store.copt_justification_hyphen_penalty == nil)
 
-    -- The menu builds and every label renders; parameters are greyed out
-    -- in greedy mode.
+    -- The menu entry opens the dialog.
     local items = {}
     plugin:addToMainMenu(items)
     local entry = items.knuth_plass
     assert(entry.text_func() == "Line breaking: greedy")
-    for _, item in ipairs(entry.sub_item_table_func()) do
-        assert(type(item.text or item.text_func()) == "string")
-        if item.sub_item_table_func then
-            for _, sub in ipairs(item.sub_item_table_func()) do
-                assert(type(sub.text or sub.text_func()) == "string")
-            end
-        end
-        if item.enabled_func then
-            assert(item.enabled_func() == false)
+    assert(entry.sub_item_table_func == nil)
+    entry.callback()
+    local dialog = shown[#shown]
+    assert(dialog == plugin.dialog)
+
+    -- Two rows per setting: its name, then its presets (and "…").
+    local function findRow(buttons, heading)
+        for i, row in ipairs(buttons) do
+            if row[1].text == heading then return buttons[i + 1] end
         end
     end
-    plugin:setValue("line_breaking_mode", 1, true)
+    assert(#dialog.buttons == 19, #dialog.buttons)
+    for i, row in ipairs(dialog.buttons) do
+        for _, button in ipairs(row) do
+            assert(type(button.text) == "string" and button.callback, i)
+        end
+    end
+    -- In greedy mode only the mode row is enabled.
+    assert(findRow(dialog.buttons, "Line breaking")[2].enabled == true)
+    assert(findRow(dialog.buttons, "Fit tolerance")[1].enabled == false)
+    -- The current preset is highlighted; a custom value shows in the name.
+    local mode_row = findRow(dialog.buttons, "Line breaking")
+    assert(mode_row[1].background and not mode_row[2].background)
+    assert(findRow(dialog.buttons, "Word-space limits: −40% / +75% (custom)") == nil)
+    assert(findRow(dialog.buttons, "Word-space limits") ~= nil) -- {40, 75} is the "loose" preset
+
+    -- Tapping a preset applies it and refreshes the dialog in place.
+    local count = #notifications
+    mode_row[2].callback()
+    assert(cre.props["crengine.style.line.breaking.mode"] == 1)
+    assert(#notifications == count) -- the dialog shows the change itself
+    assert(dialog.reinits == 1 and dialog.offset == "offset")
+    assert(findRow(dialog.buttons, "Fit tolerance")[1].enabled == true)
+    assert(findRow(dialog.buttons, "Line breaking")[2].background)
     assert(entry.text_func() == "Line breaking: Knuth–Plass")
+
+    plugin:setValue("justification_tolerance", { 70, 300 }, true)
+    local tol_row = findRow(dialog.buttons, "Fit tolerance: 70 / 300 (custom)")
+    assert(tol_row and tol_row[#tol_row].text == "…" and tol_row[#tol_row].background)
+
+    -- Long-press makes a preset the default.
+    findRow(dialog.buttons, "Fit tolerance: 70 / 300 (custom)")[1].hold_callback()
+    assert(equals(G_reader_settings.store.copt_justification_tolerance, { 50, 100 }))
+
+    dialog.tap_close_callback()
+    assert(plugin.dialog == nil)
+    assert(plugin:onShowKnuthPlassDialog())
+    assert(plugin.dialog and shown[#shown] == plugin.dialog)
 
     -- Profiles: captured settings are appended to the stock list.
     ui.profiles = {
@@ -228,9 +276,14 @@ local action_count = 0
 for name, action in pairs(registered_actions) do
     action_count = action_count + 1
     assert(type(Plugin["on" .. action.event]) == "function", name)
-    assert(action.rolling and action.category == "string", name)
-    assert(#action.args == #action.toggle, name)
+    assert(action.rolling, name)
+    if name == "knuth_plass_dialog" then
+        assert(action.category == "none")
+    else
+        assert(action.category == "string", name)
+        assert(#action.args == #action.toggle, name)
+    end
 end
-assert(action_count == 9, action_count)
+assert(action_count == 10, action_count)
 
 print("plugin tests passed")
