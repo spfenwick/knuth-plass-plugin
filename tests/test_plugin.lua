@@ -36,6 +36,7 @@ function ButtonDialog:reinit() self.reinits = self.reinits + 1 end
 function ButtonDialog:getScrolledOffset() return "offset" end
 function ButtonDialog:setScrolledOffset(offset) self.offset = offset end
 stub("ui/widget/buttondialog", ButtonDialog)
+stub("ui/widget/confirmbox", { new = function(_, o) return o end })
 stub("logger", { info = function() end, dbg = function() end })
 stub("ffi/util", {
     template = function(fmt, ...)
@@ -90,6 +91,7 @@ local function settings(values)
         store = store,
         readSetting = function(_, key) return store[key] end,
         saveSetting = function(_, key, value) store[key] = value end,
+        delSetting = function(_, key) store[key] = nil end,
     }
 end
 
@@ -215,7 +217,7 @@ do
             if row[1].text == heading then return buttons[i + 1] end
         end
     end
-    assert(#dialog.buttons == 19, #dialog.buttons)
+    assert(#dialog.buttons == 20, #dialog.buttons)
     for i, row in ipairs(dialog.buttons) do
         for _, button in ipairs(row) do
             assert(type(button.text) == "string" and button.callback, i)
@@ -244,9 +246,54 @@ do
     local tol_row = findRow(dialog.buttons, "Fit tolerance: 70 / 300 (custom)")
     assert(tol_row and tol_row[#tol_row].text == "…" and tol_row[#tol_row].background)
 
-    -- Long-press makes a preset the default.
-    findRow(dialog.buttons, "Fit tolerance: 70 / 300 (custom)")[1].hold_callback()
+    -- The default is marked with a star.
+    local function texts(row)
+        local t = {}
+        for i, button in ipairs(row) do t[i] = button.text end
+        return table.concat(t, "|")
+    end
+    assert(texts(findRow(dialog.buttons, "Line breaking")) == "greedy|Knuth–Plass ★")
+    assert(texts(tol_row) == "strict|balanced ★|forgiving|…", texts(tol_row))
+    -- A custom default is shown in the name and marks "…".
+    local hyph_row = findRow(dialog.buttons, "Hyphen penalties (default: 50 / 50)")
+    assert(hyph_row and hyph_row[#hyph_row].text == "… ★", texts(hyph_row))
+
+    -- Long-press makes a preset the default and refreshes the dialog.
+    local reinits = dialog.reinits
+    tol_row[1].hold_callback()
     assert(equals(G_reader_settings.store.copt_justification_tolerance, { 50, 100 }))
+    assert(dialog.reinits == reinits + 1)
+    tol_row = findRow(dialog.buttons, "Fit tolerance: 70 / 300 (custom)")
+    assert(texts(tol_row) == "strict ★|balanced|forgiving|…", texts(tol_row))
+    -- Long-press on "…" makes the current custom value the default.
+    tol_row[#tol_row].hold_callback()
+    assert(equals(G_reader_settings.store.copt_justification_tolerance, { 70, 300 }))
+    tol_row = findRow(dialog.buttons, "Fit tolerance: 70 / 300 (custom)")
+    assert(texts(tol_row) == "strict|balanced|forgiving|… ★", texts(tol_row))
+    -- "…" has no long-press when the current value is a preset.
+    assert(findRow(dialog.buttons, "Line breaking")[1].hold_callback ~= nil)
+    local ws_row = findRow(dialog.buttons, "Word-space limits")
+    assert(ws_row[#ws_row].hold_callback == nil)
+
+    -- Long-press on a name restores the built-in default.
+    for _, row in ipairs(dialog.buttons) do
+        if row[1].text == "Fit tolerance: 70 / 300 (custom)" then row[1].hold_callback() break end
+    end
+    assert(G_reader_settings.store.copt_justification_tolerance == nil)
+    tol_row = findRow(dialog.buttons, "Fit tolerance: 70 / 300 (custom)")
+    assert(texts(tol_row) == "strict|balanced ★|forgiving|…", texts(tol_row))
+
+    -- "Reset all defaults" asks first, then clears every default.
+    local reset = dialog.buttons[#dialog.buttons][1]
+    assert(reset.text == "Reset all defaults" and reset.enabled)
+    reset.callback()
+    local confirm = shown[#shown]
+    assert(confirm.ok_callback)
+    assert(G_reader_settings.store.copt_justification_hyphen_penalty ~= nil)
+    confirm.ok_callback()
+    assert(next(G_reader_settings.store) == nil)
+    assert(findRow(dialog.buttons, "Hyphen penalties") ~= nil)
+    assert(dialog.buttons[#dialog.buttons][1].enabled == false)
 
     dialog.tap_close_callback()
     assert(plugin.dialog == nil)

@@ -304,13 +304,20 @@ function KnuthPlass:engineSupported()
     return probe ~= nil and probe ~= ""
 end
 
+-- The value for books without their own: the user's default if set,
+-- otherwise the plugin's.
+local function defaultValue(option)
+    local value = validValue(option, G_reader_settings:readSetting("copt_" .. option.name))
+    if value == nil then
+        value = option.default
+    end
+    return copy(value)
+end
+
 function KnuthPlass:readValue(config, option)
     local value = validValue(option, config:readSetting("copt_" .. option.name))
     if value == nil then
-        value = validValue(option, G_reader_settings:readSetting("copt_" .. option.name))
-    end
-    if value == nil then
-        value = option.default
+        return defaultValue(option)
     end
     return copy(value)
 end
@@ -399,13 +406,50 @@ end
 
 function KnuthPlass:makeDefault(name, value)
     local option = options_by_name[name]
+    value = validValue(option, value)
+    if value == nil then return end
     G_reader_settings:saveSetting("copt_" .. name, copy(value))
     Notification:notify(T(_("Default %1: %2"), option.title, formatValue(option, value)))
+    self:refreshDialog()
+end
+
+-- Forget the user's default so the plugin's built-in one applies again.
+function KnuthPlass:resetDefault(name)
+    local option = options_by_name[name]
+    G_reader_settings:delSetting("copt_" .. name)
+    Notification:notify(T(_("Default %1: %2 (built-in)"), option.title,
+        formatValue(option, option.default)))
+    self:refreshDialog()
+end
+
+function KnuthPlass:hasUserDefaults()
+    for _i, option in ipairs(options) do
+        if G_reader_settings:readSetting("copt_" .. option.name) ~= nil then
+            return true
+        end
+    end
+    return false
+end
+
+function KnuthPlass:confirmResetAllDefaults()
+    local ConfirmBox = require("ui/widget/confirmbox")
+    UIManager:show(ConfirmBox:new{
+        text = _("Reset all Knuth–Plass defaults for new books to the built-in values?\n\nSettings saved with individual books are not changed."),
+        ok_text = _("Reset"),
+        ok_callback = function()
+            for _i, option in ipairs(options) do
+                G_reader_settings:delSetting("copt_" .. option.name)
+            end
+            Notification:notify(_("Knuth–Plass defaults reset"))
+            self:refreshDialog()
+        end,
+    })
 end
 
 function KnuthPlass:showPairWidget(option)
     local DoubleSpinWidget = require("ui/widget/doublespinwidget")
     local value = self.values[option.name]
+    local default = defaultValue(option)
     UIManager:show(DoubleSpinWidget:new{
         title_text = option.title,
         info_text = option.info,
@@ -416,14 +460,14 @@ function KnuthPlass:showPairWidget(option)
         left_max = option.left_max,
         left_step = option.left_step,
         left_hold_step = option.left_hold_step,
-        left_default = option.default[1],
+        left_default = default[1],
         right_text = option.right_text,
         right_value = value[2],
         right_min = option.right_min,
         right_max = option.right_max,
         right_step = option.right_step,
         right_hold_step = option.right_hold_step,
-        right_default = option.default[2],
+        right_default = default[2],
         unit = option.unit,
         keep_shown_on_apply = true,
         callback = function(left, right)
@@ -447,7 +491,7 @@ function KnuthPlass:showSingleWidget(option)
         value_max = option.value_max,
         value_step = option.value_step,
         value_hold_step = option.value_hold_step,
-        default_value = option.default,
+        default_value = defaultValue(option),
         keep_shown_on_apply = true,
         callback = function(widget)
             self:setValue(option.name, widget.value, true)
@@ -477,18 +521,26 @@ end
 -- the dialog's page-by-page scrolling relies on.
 local DIALOG_FONT_SIZE = 18
 
+-- Marks the default for new books.
+local DEFAULT_MARK = " ★"
+
 -- The dialog's rows: for each setting, its name (tap for an explanation),
--- then its presets with the current one highlighted, then "…" for a custom
--- value.
+-- then its presets with the current one highlighted and the default marked,
+-- then "…" for a custom value.
 function KnuthPlass:getDialogButtons()
     local Blitbuffer = require("ffi/blitbuffer")
     local rows = {}
     for _i, option in ipairs(options) do
         local value = self.values[option.name]
         local enabled = not option.enabled_func or option.enabled_func(self)
+        local default = defaultValue(option)
+        local custom_default = not isPreset(option, default)
         local heading = option.title
         if not isPreset(option, value) then
             heading = T(_("%1: %2 (custom)"), option.title, formatValue(option, value))
+        end
+        if custom_default and not same(value, default) then
+            heading = T(_("%1 (default: %2)"), heading, formatValue(option, default))
         end
         table.insert(rows, {
             {
@@ -499,13 +551,20 @@ function KnuthPlass:getDialogButtons()
                 callback = function()
                     self:showInfo(option)
                 end,
+                hold_callback = function()
+                    self:resetDefault(option.name)
+                end,
             },
         })
         local presets = {}
         for i, preset in ipairs(option.values) do
             local selected = same(value, preset)
+            local text = option.labels[i]
+            if same(default, preset) then
+                text = text .. DEFAULT_MARK
+            end
             table.insert(presets, {
-                text = option.labels[i],
+                text = text,
                 font_size = DIALOG_FONT_SIZE,
                 font_bold = selected,
                 background = selected and Blitbuffer.COLOR_LIGHT_GRAY or nil,
@@ -521,7 +580,7 @@ function KnuthPlass:getDialogButtons()
         if option.left_text or option.value_min then
             local custom = not isPreset(option, value)
             table.insert(presets, {
-                text = "…",
+                text = custom_default and "…" .. DEFAULT_MARK or "…",
                 font_size = DIALOG_FONT_SIZE,
                 font_bold = custom,
                 background = custom and Blitbuffer.COLOR_LIGHT_GRAY or nil,
@@ -533,17 +592,32 @@ function KnuthPlass:getDialogButtons()
                         self:showSingleWidget(option)
                     end
                 end,
+                -- Long-press makes the current custom value the default.
+                hold_callback = custom and function()
+                    self:makeDefault(option.name, value)
+                end or nil,
             })
         end
         table.insert(rows, presets)
     end
     table.insert(rows, {
         {
-            text = _("Tap a name for help. Long-press a preset to make it the default for new books."),
+            text = _("Tap a name for help. Long-press a value to make it the default for new books (marked ★). Long-press a name to restore its built-in default."),
             font_size = DIALOG_FONT_SIZE,
             font_bold = false,
             enabled = false,
             callback = function() end,
+        },
+    })
+    table.insert(rows, {
+        {
+            text = _("Reset all defaults"),
+            font_size = DIALOG_FONT_SIZE,
+            font_bold = false,
+            enabled = self:hasUserDefaults(),
+            callback = function()
+                self:confirmResetAllDefaults()
+            end,
         },
     })
     return rows

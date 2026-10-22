@@ -22,8 +22,12 @@ gesture ("Knuth–Plass justification settings").
 
 - Each value is saved with the book as `copt_<name>` (for example
   `copt_line_breaking_mode`), like KOReader's own bottom-menu settings.
-- Long-press a preset, or use "Set as default" in a custom value dialog, to
-  make it the default for books without their own value.
+- Long-press a preset (or "…" while a custom value is in use), or use "Set
+  as default" in a custom value dialog, to make it the default for books
+  without their own value. The default is marked ★; a custom default is
+  also shown next to the setting's name. Long-press a setting's name to
+  restore its built-in default, or use "Reset all defaults" at the bottom
+  of the dialog.
 - Every setting is a Dispatcher action, so it can be assigned to gestures and
   used in Profiles. Profiles' "from current book settings" includes these
   settings.
