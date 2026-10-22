@@ -33,6 +33,13 @@ function ButtonDialog:new(o)
     return setmetatable(o, { __index = self })
 end
 function ButtonDialog:reinit() self.reinits = self.reinits + 1 end
+function ButtonDialog:getAddedWidgetAvailableWidth() return 500 end
+function ButtonDialog:addWidget(widget) self.added = widget end
+function ButtonDialog:onClose()
+    if self.tap_close_callback then self.tap_close_callback() end
+    self.closed = true
+end
+stub("ui/widget/titlebar", { new = function(_, o) return o end })
 function ButtonDialog:getScrolledOffset() return "offset" end
 function ButtonDialog:setScrolledOffset(offset) self.offset = offset end
 stub("ui/widget/buttondialog", ButtonDialog)
@@ -295,8 +302,12 @@ do
     assert(findRow(dialog.buttons, "Hyphen penalties") ~= nil)
     assert(dialog.buttons[#dialog.buttons][1].enabled == false)
 
-    dialog.tap_close_callback()
-    assert(plugin.dialog == nil)
+    -- The title bar has a ✕ that closes the dialog.
+    local title_bar = dialog.added
+    assert(title_bar.title == "Knuth–Plass justification" and title_bar.width == 500)
+    assert(title_bar.parent == dialog)
+    title_bar.close_callback()
+    assert(dialog.closed and plugin.dialog == nil)
     assert(plugin:onShowKnuthPlassDialog())
     assert(plugin.dialog and shown[#shown] == plugin.dialog)
 

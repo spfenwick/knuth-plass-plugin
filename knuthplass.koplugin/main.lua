@@ -626,16 +626,39 @@ end
 function KnuthPlass:showDialog()
     if not self.active then return end
     local ButtonDialog = require("ui/widget/buttondialog")
-    self.dialog = ButtonDialog:new{
-        title = _("Knuth–Plass justification"),
+    local TitleBar = require("ui/widget/titlebar")
+    local dialog
+    dialog = ButtonDialog:new{
         use_info_style = false,
+        -- The title bar brings its own padding.
+        title_padding = 0,
+        title_margin = 0,
         buttons = self:getDialogButtons(),
         width_factor = 0.95,
         tap_close_callback = function()
             self.dialog = nil
         end,
     }
-    UIManager:show(self.dialog)
+    -- ButtonDialog has no close button, so the title is a TitleBar with
+    -- KOReader's standard ✕ in the top right corner.
+    local title_bar = TitleBar:new{
+        width = dialog:getAddedWidgetAvailableWidth(),
+        title = _("Knuth–Plass justification"),
+        align = "left",
+        with_bottom_line = false,
+        close_callback = function()
+            dialog:onClose()
+        end,
+        show_parent = dialog,
+    }
+    -- Having a parent keeps it from being freed when the dialog is
+    -- rebuilt after a change; the ✕ is not part of key navigation (Back
+    -- closes the dialog).
+    title_bar.parent = dialog
+    title_bar.not_focusable = true
+    dialog:addWidget(title_bar)
+    self.dialog = dialog
+    UIManager:show(dialog)
 end
 
 -- Rebuild the open dialog after a change, keeping its scroll position.

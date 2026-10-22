@@ -15,8 +15,9 @@ Copy `knuthplass.koplugin` into KOReader's `plugins/` folder and restart
 KOReader. Top menu → Typeset (the document menu) → "Line breaking" opens a
 dialog with all the settings in one place. Each setting has a row of
 presets, with the current one highlighted, and "…" for a custom value. Tap
-a setting's name for an explanation. The dialog can also be assigned to a
-gesture ("Knuth–Plass justification settings").
+a setting's name for an explanation, and ✕ (or tap outside) to close. The
+dialog can also be assigned to a gesture ("Knuth–Plass justification
+settings").
 
 ## How settings are stored
 
