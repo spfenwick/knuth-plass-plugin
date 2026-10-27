@@ -28,6 +28,9 @@ stub("ui/uimanager", {
 })
 stub("ffi/blitbuffer", { COLOR_LIGHT_GRAY = "lightgray" })
 local ButtonDialog = {}
+function ButtonDialog:extend(o)
+    return setmetatable(o or {}, { __index = self })
+end
 function ButtonDialog:new(o)
     o.reinits = 0
     return setmetatable(o, { __index = self })
@@ -40,6 +43,16 @@ function ButtonDialog:onClose()
     self.closed = true
 end
 stub("ui/widget/titlebar", { new = function(_, o) return o end })
+stub("ui/font", { getFace = function(_, name, size) return { name = name, size = size } end })
+stub("ui/widget/textwidget", {
+    new = function(_, o)
+        return setmetatable(o, { __index = {
+            getSize = function(self) return { w = 10, h = self.face.size + 6 } end,
+            isTruncated = function() return false end,
+            free = function() end,
+        } })
+    end,
+})
 function ButtonDialog:getScrolledOffset() return "offset" end
 function ButtonDialog:setScrolledOffset(offset) self.offset = offset end
 stub("ui/widget/buttondialog", ButtonDialog)
@@ -132,7 +145,6 @@ local function makeUI(probe, ragged)
 end
 
 local Plugin = dofile("knuthplass.koplugin/main.lua")
-local NBSP = "\194\160"
 
 -- Stock engine: inactive, nothing applied, events ignored.
 G_reader_settings = settings()
@@ -233,6 +245,18 @@ do
         end
     end
     assert(#dialog.buttons == 20, #dialog.buttons)
+    assert(dialog.setting_count == 9, dialog.setting_count)
+    -- Preset rows: two-line buttons, all the same height (name line and
+    -- smaller numbers line), each with its own id.
+    local ids, preset_height = {}, nil
+    for i = 2, 2 * dialog.setting_count, 2 do
+        for _, button in ipairs(dialog.buttons[i]) do
+            assert(button.two_line and button.id and not ids[button.id], button.id)
+            ids[button.id] = true
+            preset_height = preset_height or button.height
+            assert(button.height == preset_height and preset_height == (18 + 6) + (14 + 6))
+        end
+    end
     for i, row in ipairs(dialog.buttons) do
         for _, button in ipairs(row) do
             assert(type(button.text) == "string" and button.callback, i)
@@ -261,26 +285,28 @@ do
     local tol_row = findRow(dialog.buttons, "Fit tolerance: 70 / 300 (custom)")
     assert(tol_row and tol_row[#tol_row].text == "…" and tol_row[#tol_row].background)
 
-    -- Each preset shows its numbers after its name (the default marked
-    -- with a star). Only the space before the numbers may wrap.
+    -- Each preset shows its name (the default marked with a star), and
+    -- its numbers on a second line ("name numbers" here).
     local function texts(row)
         local t = {}
-        for i, button in ipairs(row) do t[i] = button.text:gsub(NBSP, "_") end
+        for i, button in ipairs(row) do
+            t[i] = button.text .. (button.numbers and " " .. button.numbers or "")
+        end
         return table.concat(t, "|")
     end
-    assert(texts(findRow(dialog.buttons, "Line breaking")) == "greedy|Knuth–Plass_★")
-    assert(texts(tol_row) == "strict 50/100|balanced_★ 100/200|forgiving 200/500|…", texts(tol_row))
+    assert(texts(findRow(dialog.buttons, "Line breaking")) == "greedy|Knuth–Plass ★")
+    assert(texts(tol_row) == "strict 50/100|balanced ★ 100/200|forgiving 200/500|…", texts(tol_row))
     assert(texts(findRow(dialog.buttons, "Word-space limits"))
-        == "tight_★ −25%/+35%|balanced −33%/+50%|loose −40%/+75%|…")
+        == "tight ★ −25%/+35%|balanced −33%/+50%|loose −40%/+75%|…")
     -- A custom default is shown in the name and marks "…".
     local hyph_row = findRow(dialog.buttons, "Hyphen penalties (default: 50 / 50)")
-    assert(hyph_row and texts(hyph_row) == "free|light 1k/1k|moderate 3k/3k|strong 10k/10k|…_★", texts(hyph_row))
+    assert(hyph_row and texts(hyph_row) == "free|light 1k/1k|moderate 3k/3k|strong 10k/10k|… ★", texts(hyph_row))
     assert(texts(findRow(dialog.buttons, "Repeated-hyphen penalties: 10000 / 5000 (custom)"))
-        == "free|light 1M/500k|moderate_★ 3M/1.5M|strong 10M/5M|…")
+        == "free|light 1M/500k|moderate ★ 3M/1.5M|strong 10M/5M|…")
     assert(texts(findRow(dialog.buttons, "Letter-space smoothness"))
-        == "off|strict 0.25%|smooth_★ 0.50%|relaxed 1.00%|…")
+        == "off|strict 0.25%|smooth ★ 0.50%|relaxed 1.00%|…")
     assert(texts(findRow(dialog.buttons, "Letter-space limits"))
-        == "off|fallback_★ −1%/+0%|…")
+        == "off|fallback ★ −1%/+0%|…")
 
     -- Long-press makes a preset the default and refreshes the dialog.
     local reinits = dialog.reinits
@@ -288,12 +314,12 @@ do
     assert(equals(G_reader_settings.store.copt_justification_tolerance, { 50, 100 }))
     assert(dialog.reinits == reinits + 1)
     tol_row = findRow(dialog.buttons, "Fit tolerance: 70 / 300 (custom)")
-    assert(texts(tol_row) == "strict_★ 50/100|balanced 100/200|forgiving 200/500|…", texts(tol_row))
+    assert(texts(tol_row) == "strict ★ 50/100|balanced 100/200|forgiving 200/500|…", texts(tol_row))
     -- Long-press on "…" makes the current custom value the default.
     tol_row[#tol_row].hold_callback()
     assert(equals(G_reader_settings.store.copt_justification_tolerance, { 70, 300 }))
     tol_row = findRow(dialog.buttons, "Fit tolerance: 70 / 300 (custom)")
-    assert(texts(tol_row) == "strict 50/100|balanced 100/200|forgiving 200/500|…_★", texts(tol_row))
+    assert(texts(tol_row) == "strict 50/100|balanced 100/200|forgiving 200/500|… ★", texts(tol_row))
     -- "…" has no long-press when the current value is a preset.
     assert(findRow(dialog.buttons, "Line breaking")[1].hold_callback ~= nil)
     local ws_row = findRow(dialog.buttons, "Word-space limits")
@@ -305,7 +331,7 @@ do
     end
     assert(G_reader_settings.store.copt_justification_tolerance == nil)
     tol_row = findRow(dialog.buttons, "Fit tolerance: 70 / 300 (custom)")
-    assert(texts(tol_row) == "strict 50/100|balanced_★ 100/200|forgiving 200/500|…", texts(tol_row))
+    assert(texts(tol_row) == "strict 50/100|balanced ★ 100/200|forgiving 200/500|…", texts(tol_row))
 
     -- "Reset all defaults" asks first, then clears every default.
     local reset = dialog.buttons[#dialog.buttons][1]
@@ -397,8 +423,8 @@ do
     assert(#buttons == 22, #buttons)
     assert(buttons[19][1].text == "Ragged text: 12% / 300 (custom)", buttons[19][1].text)
     local labels = {}
-    for i, button in ipairs(buttons[20]) do labels[i] = button.text:gsub(NBSP, "_") end
-    assert(table.concat(labels, "|") == "greedy|even 10%/100|balanced_★ 15%/100|fewer_hyphens 15%/200|…",
+    for i, button in ipairs(buttons[20]) do labels[i] = button.text .. (button.numbers and " " .. button.numbers or "") end
+    assert(table.concat(labels, "|") == "greedy|even 10%/100|balanced ★ 15%/100|fewer hyphens 15%/200|…",
         table.concat(labels, "|"))
     -- Presets apply both properties and are saved with the book.
     buttons[20][1].callback()

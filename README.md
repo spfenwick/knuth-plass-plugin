@@ -15,7 +15,9 @@ With a stock engine the plugin stays inactive and the menu entry shows
 Copy `knuthplass.koplugin` into KOReader's `plugins/` folder and restart
 KOReader. Top menu → Typeset (the document menu) → "Line breaking" opens a
 dialog with all the settings in one place. Each setting has a row of
-presets, with the current one highlighted, and "…" for a custom value. Tap
+presets, each with its values in smaller text below its name (large ones
+shortened, as 3k or 1.5M), with the current one highlighted, and "…" for a
+custom value. The dialog scrolls one whole setting at a time. Tap
 a setting's name for an explanation, and ✕ (or tap outside) to close. The
 dialog can also be assigned to a gesture ("Knuth–Plass justification
 settings").
@@ -47,8 +49,8 @@ settings").
 | Fit tolerance | `crengine.style.justify.pretolerance`, `.tolerance` | 100 / 200 |
 | Line-quality penalties | `crengine.style.justify.line.penalty`, `.adjacent.demerits` | 10 / 10000 |
 | Emergency & ending | `crengine.style.justify.emergency.stretch.percent`, `.last.line.min.percent` | 6% / 33% |
-| Hyphen penalties | `crengine.style.justify.hyphen.penalty`, `.explicit.hyphen.penalty` | 0 / 0 |
-| Repeated-hyphen penalties | `crengine.style.justify.double.hyphen.demerits`, `.final.hyphen.demerits` | 0 / 0 |
+| Hyphen penalties | `crengine.style.justify.hyphen.penalty`, `.explicit.hyphen.penalty` | 3000 / 3000 (moderate) |
+| Repeated-hyphen penalties | `crengine.style.justify.double.hyphen.demerits`, `.final.hyphen.demerits` | 3000000 / 1500000 (moderate) |
 | Ragged text | `crengine.style.ragged.width.percent`, `crengine.style.ragged.hyphen.penalty` | 15% / 100 |
 
 Ragged text only appears with engines that have it (the menu probes

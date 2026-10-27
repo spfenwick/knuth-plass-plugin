@@ -273,7 +273,6 @@ local function same(a, b)
     return a == b
 end
 
-local NBSP = "\194\160"
 
 -- Short form of a number for preset buttons: 3000 → 3k, 1500000 → 1.5M.
 local function shortNumber(n)
@@ -636,28 +635,135 @@ local function isPreset(option, value)
     return false
 end
 
--- All rows use the same face and size so they have the same height, which
--- the dialog's page-by-page scrolling relies on.
+-- All setting names use the same face and size, and all rows of presets
+-- the same height, so that each setting (its name row and its presets row)
+-- has the same height: the dialog scrolls a whole number of settings.
 local DIALOG_FONT_SIZE = 18
+-- Preset numbers go on a second line, in smaller text.
+local NUMBERS_FONT_SIZE = 14
 
--- Marks the default for new books. (A no-break space keeps it with the
--- name when a button wraps.)
-local DEFAULT_MARK = NBSP .. "★"
+-- Marks the default for new books.
+local DEFAULT_MARK = " ★"
 
--- A preset button: its name (and ★), then its numbers. A button that
--- doesn't fit shrinks its text and then wraps it onto two lines, so the
--- only breakable space is the one before the numbers: the name stays on
--- the first line and the numbers go to the second.
-local function presetButtonText(option, i, is_default)
-    local text = option.labels[i]:gsub(" ", NBSP)
-    if is_default then
-        text = text .. DEFAULT_MARK
+-- A TextWidget for one line of a preset button, in a smaller size if
+-- needed to fit the button's width.
+local function fittedLine(text, size, bold, width, fgcolor)
+    local Font = require("ui/font")
+    local TextWidget = require("ui/widget/textwidget")
+    local widget
+    while true do
+        widget = TextWidget:new{
+            text = text,
+            face = Font:getFace("cfont", size),
+            bold = bold,
+            fgcolor = fgcolor,
+            max_width = width,
+        }
+        if not widget:isTruncated() or size <= 10 then
+            return widget
+        end
+        widget:free()
+        size = size - 1
     end
-    local numbers = presetNumbers(option, option.values[i])
-    if numbers then
-        text = text .. " " .. numbers:gsub(" ", NBSP)
+end
+
+-- Height of a row of presets: the name line and the numbers line.
+local function presetRowHeight()
+    local Font = require("ui/font")
+    local TextWidget = require("ui/widget/textwidget")
+    local height = 0
+    for _i, size in ipairs({ DIALOG_FONT_SIZE, NUMBERS_FONT_SIZE }) do
+        local widget = TextWidget:new{ text = "0", face = Font:getFace("cfont", size) }
+        height = height + widget:getSize().h
+        widget:free()
     end
-    return text
+    return height
+end
+
+-- ButtonDialog with preset buttons on two lines (name, then numbers in
+-- smaller text), which ButtonTable can't do by itself: their labels are
+-- replaced after every (re)build. Created on first use, as KOReader's
+-- widgets can only be loaded once the UI is up.
+local PresetDialog
+local function presetDialogClass()
+    if PresetDialog then
+        return PresetDialog
+    end
+    local ButtonDialog = require("ui/widget/buttondialog")
+    PresetDialog = ButtonDialog:extend{}
+    function PresetDialog:init()
+        ButtonDialog.init(self)
+        self:makeTwoLineButtons()
+        self:scrollBySetting()
+    end
+    function PresetDialog:makeTwoLineButtons()
+        local Blitbuffer = require("ffi/blitbuffer")
+        local VerticalGroup = require("ui/widget/verticalgroup")
+        for _i, row in ipairs(self.buttons) do
+            for _j, entry in ipairs(row) do
+                local button = entry.two_line and self:getButtonById(entry.id)
+                if button and button.label_container then
+                    local width = button.label_container.dimen.w
+                    local fgcolor = entry.enabled == false and Blitbuffer.COLOR_DARK_GRAY
+                        or Blitbuffer.COLOR_BLACK
+                    local name = fittedLine(entry.text, DIALOG_FONT_SIZE, entry.font_bold, width, fgcolor)
+                    local group = VerticalGroup:new{ align = "center", name }
+                    if entry.numbers then
+                        table.insert(group, fittedLine(entry.numbers, NUMBERS_FONT_SIZE,
+                            entry.font_bold, width, fgcolor))
+                    end
+                    button.label_widget:free()
+                    button.label_widget = name -- (what Button dims or undims)
+                    button.label_container[1] = group
+                end
+            end
+        end
+    end
+    -- Scroll by setting (its name row and its presets row together) rather
+    -- than by row, so that a page never ends with a name whose presets are
+    -- on the next page, and size the visible part to a whole number of
+    -- settings.
+    function PresetDialog:scrollBySetting()
+        local container = self.cropping_widget
+        local grid = container and container.step_scroll_grid
+        if not grid or not self.setting_count then
+            return
+        end
+        local merged = {}
+        for k = 1, self.setting_count do
+            local name_row, presets_row = grid[2*k - 1], grid[2*k]
+            if not presets_row then
+                return
+            end
+            merged[k] = {
+                row_num = k,
+                top = name_row.top,
+                content_top = name_row.content_top,
+                content_bottom = presets_row.content_bottom,
+                bottom = presets_row.bottom,
+            }
+        end
+        for i = 2*self.setting_count + 1, #grid do
+            local row = util.tableDeepCopy(grid[i])
+            row.row_num = #merged + 1
+            table.insert(merged, row)
+        end
+        local Screen = require("device").screen
+        local Size = require("ui/size")
+        local available = Screen:getHeight() - 2*Size.padding.buttontable - 2*Size.margin.default
+        if self.title_group then
+            available = available - self.title_group:getSize().h - Size.line.medium
+        end
+        local setting_height = merged[1].bottom + 1 - merged[1].top
+        local settings_per_page = math.floor(available / setting_height)
+        if settings_per_page >= 1 then
+            container.dimen.h = settings_per_page * setting_height
+        end
+        -- (The container sets itself up with these when first painted.)
+        container.step_scroll_grid = merged
+        container.hide_truncated_grid_items = true
+    end
+    return PresetDialog
 end
 
 -- The dialog's rows: for each setting, its name (tap for an explanation),
@@ -665,6 +771,7 @@ end
 -- then "…" for a custom value.
 function KnuthPlass:getDialogButtons()
     local Blitbuffer = require("ffi/blitbuffer")
+    local row_height = presetRowHeight()
     local rows = {}
     for _i, option in ipairs(self:supportedOptions()) do
         local value = self.values[option.name]
@@ -695,9 +802,17 @@ function KnuthPlass:getDialogButtons()
         local presets = {}
         for i, preset in ipairs(option.values) do
             local selected = same(value, preset)
-            local text = presetButtonText(option, i, same(default, preset))
+            local text = option.labels[i]
+            if same(default, preset) then
+                text = text .. DEFAULT_MARK
+            end
             table.insert(presets, {
+                id = option.name .. "#" .. i,
                 text = text,
+                numbers = presetNumbers(option, preset),
+                two_line = true,
+                height = row_height,
+                avoid_text_truncation = false, -- (the label is replaced)
                 font_size = DIALOG_FONT_SIZE,
                 font_bold = selected,
                 background = selected and Blitbuffer.COLOR_LIGHT_GRAY or nil,
@@ -713,7 +828,11 @@ function KnuthPlass:getDialogButtons()
         if option.left_text or option.value_min then
             local custom = not isPreset(option, value)
             table.insert(presets, {
+                id = option.name .. "#custom",
                 text = custom_default and "…" .. DEFAULT_MARK or "…",
+                two_line = true,
+                height = row_height,
+                avoid_text_truncation = false,
                 font_size = DIALOG_FONT_SIZE,
                 font_bold = custom,
                 background = custom and Blitbuffer.COLOR_LIGHT_GRAY or nil,
@@ -758,15 +877,15 @@ end
 
 function KnuthPlass:showDialog()
     if not self.active then return end
-    local ButtonDialog = require("ui/widget/buttondialog")
     local TitleBar = require("ui/widget/titlebar")
     local dialog
-    dialog = ButtonDialog:new{
+    dialog = presetDialogClass():new{
         use_info_style = false,
         -- The title bar brings its own padding.
         title_padding = 0,
         title_margin = 0,
         buttons = self:getDialogButtons(),
+        setting_count = #self:supportedOptions(),
         width_factor = 0.95,
         tap_close_callback = function()
             self.dialog = nil
