@@ -132,6 +132,7 @@ local function makeUI(probe, ragged)
 end
 
 local Plugin = dofile("knuthplass.koplugin/main.lua")
+local NBSP = "\194\160"
 
 -- Stock engine: inactive, nothing applied, events ignored.
 G_reader_settings = settings()
@@ -155,8 +156,10 @@ do
     assert(cre.props["crengine.style.line.breaking.mode"] == 1)
     assert(cre.props["crengine.style.justify.space.shrink.percent"] == 25)
     assert(cre.props["crengine.style.justify.space.stretch.percent"] == 35)
-    assert(cre.props["crengine.style.justify.hyphen.penalty"] == 0)
-    assert(cre.props["crengine.style.justify.final.hyphen.demerits"] == 0)
+    assert(cre.props["crengine.style.justify.hyphen.penalty"] == 3000)
+    assert(cre.props["crengine.style.justify.explicit.hyphen.penalty"] == 3000)
+    assert(cre.props["crengine.style.justify.double.hyphen.demerits"] == 3000000)
+    assert(cre.props["crengine.style.justify.final.hyphen.demerits"] == 1500000)
     assert(cre.props["crengine.style.justify.tracking.delta.max.bp"] == 50)
     -- Page-level and kerning settings belong to other builds.
     assert(cre.props["crengine.style.justify.refinement.passes"] == nil)
@@ -258,17 +261,26 @@ do
     local tol_row = findRow(dialog.buttons, "Fit tolerance: 70 / 300 (custom)")
     assert(tol_row and tol_row[#tol_row].text == "…" and tol_row[#tol_row].background)
 
-    -- The default is marked with a star.
+    -- Each preset shows its numbers after its name (the default marked
+    -- with a star). Only the space before the numbers may wrap.
     local function texts(row)
         local t = {}
-        for i, button in ipairs(row) do t[i] = button.text end
+        for i, button in ipairs(row) do t[i] = button.text:gsub(NBSP, "_") end
         return table.concat(t, "|")
     end
-    assert(texts(findRow(dialog.buttons, "Line breaking")) == "greedy|Knuth–Plass ★")
-    assert(texts(tol_row) == "strict|balanced ★|forgiving|…", texts(tol_row))
+    assert(texts(findRow(dialog.buttons, "Line breaking")) == "greedy|Knuth–Plass_★")
+    assert(texts(tol_row) == "strict 50/100|balanced_★ 100/200|forgiving 200/500|…", texts(tol_row))
+    assert(texts(findRow(dialog.buttons, "Word-space limits"))
+        == "tight_★ −25%/+35%|balanced −33%/+50%|loose −40%/+75%|…")
     -- A custom default is shown in the name and marks "…".
     local hyph_row = findRow(dialog.buttons, "Hyphen penalties (default: 50 / 50)")
-    assert(hyph_row and hyph_row[#hyph_row].text == "… ★", texts(hyph_row))
+    assert(hyph_row and texts(hyph_row) == "free|light 1k/1k|moderate 3k/3k|strong 10k/10k|…_★", texts(hyph_row))
+    assert(texts(findRow(dialog.buttons, "Repeated-hyphen penalties: 10000 / 5000 (custom)"))
+        == "free|light 1M/500k|moderate_★ 3M/1.5M|strong 10M/5M|…")
+    assert(texts(findRow(dialog.buttons, "Letter-space smoothness"))
+        == "off|strict 0.25%|smooth_★ 0.50%|relaxed 1.00%|…")
+    assert(texts(findRow(dialog.buttons, "Letter-space limits"))
+        == "off|fallback_★ −1%/+0%|…")
 
     -- Long-press makes a preset the default and refreshes the dialog.
     local reinits = dialog.reinits
@@ -276,12 +288,12 @@ do
     assert(equals(G_reader_settings.store.copt_justification_tolerance, { 50, 100 }))
     assert(dialog.reinits == reinits + 1)
     tol_row = findRow(dialog.buttons, "Fit tolerance: 70 / 300 (custom)")
-    assert(texts(tol_row) == "strict ★|balanced|forgiving|…", texts(tol_row))
+    assert(texts(tol_row) == "strict_★ 50/100|balanced 100/200|forgiving 200/500|…", texts(tol_row))
     -- Long-press on "…" makes the current custom value the default.
     tol_row[#tol_row].hold_callback()
     assert(equals(G_reader_settings.store.copt_justification_tolerance, { 70, 300 }))
     tol_row = findRow(dialog.buttons, "Fit tolerance: 70 / 300 (custom)")
-    assert(texts(tol_row) == "strict|balanced|forgiving|… ★", texts(tol_row))
+    assert(texts(tol_row) == "strict 50/100|balanced 100/200|forgiving 200/500|…_★", texts(tol_row))
     -- "…" has no long-press when the current value is a preset.
     assert(findRow(dialog.buttons, "Line breaking")[1].hold_callback ~= nil)
     local ws_row = findRow(dialog.buttons, "Word-space limits")
@@ -293,7 +305,7 @@ do
     end
     assert(G_reader_settings.store.copt_justification_tolerance == nil)
     tol_row = findRow(dialog.buttons, "Fit tolerance: 70 / 300 (custom)")
-    assert(texts(tol_row) == "strict|balanced ★|forgiving|…", texts(tol_row))
+    assert(texts(tol_row) == "strict 50/100|balanced_★ 100/200|forgiving 200/500|…", texts(tol_row))
 
     -- "Reset all defaults" asks first, then clears every default.
     local reset = dialog.buttons[#dialog.buttons][1]
@@ -345,6 +357,9 @@ for name, action in pairs(registered_actions) do
     else
         assert(action.category == "string", name)
         assert(#action.args == #action.toggle, name)
+        if name == "justification_hyphen_penalty" then
+            assert(action.toggle[1] == "free" and action.toggle[3] == "moderate (3k/3k)", action.toggle[3])
+        end
     end
 end
 assert(action_count == 11, action_count)
@@ -382,8 +397,9 @@ do
     assert(#buttons == 22, #buttons)
     assert(buttons[19][1].text == "Ragged text: 12% / 300 (custom)", buttons[19][1].text)
     local labels = {}
-    for i, button in ipairs(buttons[20]) do labels[i] = button.text end
-    assert(table.concat(labels, "|") == "greedy|even|balanced ★|fewer hyphens|…", table.concat(labels, "|"))
+    for i, button in ipairs(buttons[20]) do labels[i] = button.text:gsub(NBSP, "_") end
+    assert(table.concat(labels, "|") == "greedy|even 10%/100|balanced_★ 15%/100|fewer_hyphens 15%/200|…",
+        table.concat(labels, "|"))
     -- Presets apply both properties and are saved with the book.
     buttons[20][1].callback()
     assert(cre.props["crengine.style.ragged.width.percent"] == 0)
@@ -391,7 +407,7 @@ do
     assert(equals(ui.doc_settings.store.copt_ragged_text, { 0, 100 }))
     assert(plugin:onSetRaggedText({ 15, 200 }))
     assert(cre.props["crengine.style.ragged.hyphen.penalty"] == 200)
-    assert(notifications[#notifications] == "Ragged text: fewer hyphens", notifications[#notifications])
+    assert(notifications[#notifications] == "Ragged text: fewer hyphens (15%/200)", notifications[#notifications])
     -- Profiles capture it.
     ui.profiles = {
         ui = ui,

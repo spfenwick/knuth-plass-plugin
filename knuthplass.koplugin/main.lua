@@ -42,6 +42,8 @@ local options = {
         default = 1,
         values = { 0, 1 },
         labels = { C_("Line breaking", "greedy"), C_("Line breaking", "Knuth–Plass") },
+        -- (0 and 1 are just the engine's names for these)
+        preset_numbers = function() return nil end,
         properties = { "crengine.style.line.breaking.mode" },
         info = _([[Choose how text is split into lines.
 
@@ -79,7 +81,7 @@ Knuth–Plass falls back to greedy for paragraphs with floats, drop caps, bidire
         values = { { 0, 0 }, { 1, 0 } },
         labels = {
             C_("Letter spacing", "off"),
-            C_("Letter spacing", "−1% fallback"),
+            C_("Letter spacing", "fallback"),
         },
         properties = {
             "crengine.style.justify.tracking.shrink.percent",
@@ -106,6 +108,10 @@ Only used with best kerning (HarfBuzz).]]),
             C_("Adjacent-line letter spacing", "relaxed"),
         },
         properties = { "crengine.style.justify.tracking.delta.max.bp" },
+        preset_numbers = function(value)
+            if value == 0 then return nil end -- no limit
+            return string.format("%.2f%%", value / 100)
+        end,
         enabled_func = knuthOnly,
         value_min = 0, value_max = 1000, value_step = 5, value_hold_step = 25,
         info = _([[Maximum change in letter spacing between consecutive justified lines, in basis points. 50 means 0.50 percentage points. Off removes the limit.]]),
@@ -175,7 +181,7 @@ Only used with best kerning (HarfBuzz).]]),
         name = "justification_hyphen_penalty",
         event = "SetJustificationHyphenPenalty",
         title = _("Hyphen penalties"),
-        default = { 0, 0 },
+        default = { 3000, 3000 },
         values = { { 0, 0 }, { 1000, 1000 }, { 3000, 3000 }, { 10000, 10000 } },
         labels = {
             C_("Hyphen penalty", "free"),
@@ -198,7 +204,7 @@ A penalty only chooses between layouts that fit the word-space limits: where a l
         name = "justification_hyphen_demerits",
         event = "SetJustificationHyphenDemerits",
         title = _("Repeated-hyphen penalties"),
-        default = { 0, 0 },
+        default = { 3000000, 1500000 },
         values = { { 0, 0 }, { 1000000, 500000 }, { 3000000, 1500000 }, { 10000000, 5000000 } },
         labels = {
             C_("Repeated hyphens", "free"),
@@ -237,6 +243,10 @@ A penalty only chooses between layouts that fit the word-space limits: where a l
         left_text = _("Rag width %"), left_min = 0, left_max = 100, left_step = 1, left_hold_step = 5,
         right_text = _("Hyphen"), right_min = 0, right_max = 100000, right_step = 10, right_hold_step = 100,
         format = function(value) return T("%1% / %2", value[1], value[2]) end,
+        preset_numbers = function(value)
+            if value[1] == 0 then return nil end -- greedy: the penalty is unused
+            return T("%1%/%2", value[1], value[2])
+        end,
         info = _([[Left-aligned, right-aligned and centered paragraphs keep their natural word spacing; Knuth–Plass chooses their line breaks so that line lengths are as even as possible.
 
 Rag width is how far short of the full width a line may fall, as a percentage of the line width, before it counts as loose: a smaller width gives an evener right edge, with more hyphens. 0 leaves these paragraphs to greedy line breaking.
@@ -263,10 +273,55 @@ local function same(a, b)
     return a == b
 end
 
+local NBSP = "\194\160"
+
+-- Short form of a number for preset buttons: 3000 → 3k, 1500000 → 1.5M.
+local function shortNumber(n)
+    if n >= 1000000 and n % 100000 == 0 then
+        return string.format("%g", n / 1000000) .. "M"
+    elseif n >= 1000 and n % 100 == 0 then
+        return string.format("%g", n / 1000) .. "k"
+    end
+    return tostring(n)
+end
+
+-- The numbers behind a preset, shown next to its name (nil when they would
+-- say nothing more than the name, as for "off" or "free").
+local function presetNumbers(option, value)
+    if option.preset_numbers then
+        return option.preset_numbers(value)
+    end
+    if type(value) == "table" then
+        if value[1] == 0 and value[2] == 0 then
+            return nil
+        end
+        local a, b = shortNumber(value[1]), shortNumber(value[2])
+        if option.signed then
+            return T("−%1%/+%2%", a, b)
+        elseif option.unit == "%" then
+            return T("%1%/%2%", a, b)
+        end
+        return a .. "/" .. b
+    end
+    if value == 0 then
+        return nil
+    end
+    return shortNumber(value)
+end
+
+-- A preset's name and numbers, for menus and notifications.
+local function presetText(option, i)
+    local numbers = presetNumbers(option, option.values[i])
+    if numbers then
+        return T("%1 (%2)", option.labels[i], numbers)
+    end
+    return option.labels[i]
+end
+
 local function formatValue(option, value)
     for i, preset in ipairs(option.values) do
         if same(preset, value) then
-            return option.labels[i]
+            return presetText(option, i)
         end
     end
     if option.format then
@@ -315,7 +370,13 @@ function KnuthPlass:onDispatcherRegisterActions()
             event = option.event,
             title = option.title,
             args = option.values,
-            toggle = option.labels,
+            toggle = (function()
+                local toggle = {}
+                for i = 1, #option.values do
+                    toggle[i] = presetText(option, i)
+                end
+                return toggle
+            end)(),
             configurable = { name = option.name, values = option.values },
             rolling = true,
         })
@@ -579,8 +640,25 @@ end
 -- the dialog's page-by-page scrolling relies on.
 local DIALOG_FONT_SIZE = 18
 
--- Marks the default for new books.
-local DEFAULT_MARK = " ★"
+-- Marks the default for new books. (A no-break space keeps it with the
+-- name when a button wraps.)
+local DEFAULT_MARK = NBSP .. "★"
+
+-- A preset button: its name (and ★), then its numbers. A button that
+-- doesn't fit shrinks its text and then wraps it onto two lines, so the
+-- only breakable space is the one before the numbers: the name stays on
+-- the first line and the numbers go to the second.
+local function presetButtonText(option, i, is_default)
+    local text = option.labels[i]:gsub(" ", NBSP)
+    if is_default then
+        text = text .. DEFAULT_MARK
+    end
+    local numbers = presetNumbers(option, option.values[i])
+    if numbers then
+        text = text .. " " .. numbers:gsub(" ", NBSP)
+    end
+    return text
+end
 
 -- The dialog's rows: for each setting, its name (tap for an explanation),
 -- then its presets with the current one highlighted and the default marked,
@@ -617,10 +695,7 @@ function KnuthPlass:getDialogButtons()
         local presets = {}
         for i, preset in ipairs(option.values) do
             local selected = same(value, preset)
-            local text = option.labels[i]
-            if same(default, preset) then
-                text = text .. DEFAULT_MARK
-            end
+            local text = presetButtonText(option, i, same(default, preset))
             table.insert(presets, {
                 text = text,
                 font_size = DIALOG_FONT_SIZE,
