@@ -43,12 +43,12 @@ local options = {
         values = { 0, 1 },
         labels = { C_("Line breaking", "greedy"), C_("Line breaking", "Knuth–Plass") },
         properties = { "crengine.style.line.breaking.mode" },
-        info = _([[Choose how justified text is split into lines.
+        info = _([[Choose how text is split into lines.
 
 - greedy: KOReader's standard line-by-line strategy.
-- Knuth–Plass: chooses the line breaks of each paragraph together, so that word spacing is as even as possible across the whole paragraph.
+- Knuth–Plass: chooses the line breaks of each paragraph together: in justified text, so that word spacing is as even as possible across the whole paragraph; in left-aligned, right-aligned or centered text, so that the line lengths are as even as possible (see Ragged text).
 
-Knuth–Plass falls back to greedy for paragraphs with images, floats, inline boxes, bidirectional or CJK text.]]),
+Knuth–Plass falls back to greedy for paragraphs with floats, drop caps, bidirectional or CJK text.]]),
     },
     {
         name = "justification_word_spacing",
@@ -190,7 +190,7 @@ Only used with best kerning (HarfBuzz).]]),
         enabled_func = knuthOnly,
         left_text = _("Hyphenation"), left_min = 0, left_max = 100000, left_step = 100, left_hold_step = 1000,
         right_text = _("Explicit"), right_min = 0, right_max = 100000, right_step = 100, right_hold_step = 1000,
-        info = _([[Cost of ending a line at a hyphenation point, and at a hyphen already in the text. Higher values mean fewer hyphenated lines, at the price of less even spacing. Values below about 1000 have little effect.
+        info = _([[Cost of ending a line of justified text at a hyphenation point, and at a hyphen already in the text. Higher values mean fewer hyphenated lines, at the price of less even spacing. Values below about 1000 have little effect. (Ragged text has its own hyphen penalty.)
 
 A penalty only chooses between layouts that fit the word-space limits: where a line cannot be filled without breaking a word, the hyphen stays. Looser word-space limits leave more room to avoid hyphens.]]),
     },
@@ -215,6 +215,36 @@ A penalty only chooses between layouts that fit the word-space limits: where a l
         right_text = _("Before last"), right_min = 0, right_max = 10000000, right_step = 10000, right_hold_step = 100000,
         info = _([[Extra demerits for two hyphenated lines in a row, and for hyphenating the second-to-last line of a paragraph. Values below about 1000000 have little effect.]]),
     },
+    {
+        name = "ragged_text",
+        event = "SetRaggedText",
+        title = _("Ragged text"),
+        default = { 15, 100 },
+        values = { { 0, 100 }, { 10, 100 }, { 15, 100 }, { 15, 200 } },
+        labels = {
+            C_("Ragged text", "greedy"),
+            C_("Ragged text", "even"),
+            C_("Ragged text", "balanced"),
+            C_("Ragged text", "fewer hyphens"),
+        },
+        properties = {
+            "crengine.style.ragged.width.percent",
+            "crengine.style.ragged.hyphen.penalty",
+        },
+        -- Engines with Knuth–Plass but without ragged text lack these.
+        requires = "crengine.style.ragged.width.percent",
+        enabled_func = knuthOnly,
+        left_text = _("Rag width %"), left_min = 0, left_max = 100, left_step = 1, left_hold_step = 5,
+        right_text = _("Hyphen"), right_min = 0, right_max = 100000, right_step = 10, right_hold_step = 100,
+        format = function(value) return T("%1% / %2", value[1], value[2]) end,
+        info = _([[Left-aligned, right-aligned and centered paragraphs keep their natural word spacing; Knuth–Plass chooses their line breaks so that line lengths are as even as possible.
+
+Rag width is how far short of the full width a line may fall, as a percentage of the line width, before it counts as loose: a smaller width gives an evener right edge, with more hyphens. 0 leaves these paragraphs to greedy line breaking.
+
+Hyphen is the cost of ending a line at a hyphenation point (hyphens already in the text cost nothing). It is on a much smaller scale than the justified hyphen penalties: about 100 hyphenates only to avoid a fairly short line.
+
+As spaces are never condensed, ragged text takes a few percent more pages than with greedy line breaking.]]),
+    },
 }
 
 local options_by_name = {}
@@ -238,6 +268,9 @@ local function formatValue(option, value)
         if same(preset, value) then
             return option.labels[i]
         end
+    end
+    if option.format then
+        return option.format(value)
     end
     if type(value) == "table" then
         if option.signed then
@@ -266,6 +299,7 @@ end
 
 function KnuthPlass:init()
     self.values = {}
+    self.supported = {}
     self.active = false
     self:onDispatcherRegisterActions()
     -- Only reflowable (CREngine) documents have these settings.
@@ -302,6 +336,27 @@ function KnuthPlass:engineSupported()
     end
     local probe = document._document:getStringProperty(CAPABILITY_PROPERTY)
     return probe ~= nil and probe ~= ""
+end
+
+-- Whether the engine has this setting (a Knuth–Plass engine fills in a
+-- default for every property it knows).
+function KnuthPlass:optionSupported(option)
+    if not option.requires then
+        return true
+    end
+    local probe = self.ui.document._document:getStringProperty(option.requires)
+    return probe ~= nil and probe ~= ""
+end
+
+-- The settings this engine has, in menu order.
+function KnuthPlass:supportedOptions()
+    local list = {}
+    for _i, option in ipairs(options) do
+        if self.supported[option.name] then
+            table.insert(list, option)
+        end
+    end
+    return list
 end
 
 -- The value for books without their own: the user's default if set,
@@ -343,6 +398,9 @@ function KnuthPlass:onReadSettings(config)
         return
     end
     for _i, option in ipairs(options) do
+        self.supported[option.name] = self:optionSupported(option)
+    end
+    for _i, option in ipairs(self:supportedOptions()) do
         local value = self:readValue(config, option)
         self.values[option.name] = value
         -- Keeping the value in configurable lets ReaderConfig save it with
@@ -373,7 +431,7 @@ function KnuthPlass:hookProfiles()
             return profile
         end
         local order = profile.settings.order or {}
-        for _i, option in ipairs(options) do
+        for _i, option in ipairs(self:supportedOptions()) do
             local value = self.values[option.name]
             if value ~= nil and not util.arrayContains(order, option.name) then
                 table.insert(order, option.name)
@@ -388,7 +446,7 @@ end
 
 function KnuthPlass:setValue(name, value, quiet)
     local option = options_by_name[name]
-    if not option or not self.active then return end
+    if not option or not self.active or not self.supported[name] then return end
     value = validValue(option, value)
     if value == nil then return end
     value = copy(value)
@@ -530,7 +588,7 @@ local DEFAULT_MARK = " ★"
 function KnuthPlass:getDialogButtons()
     local Blitbuffer = require("ffi/blitbuffer")
     local rows = {}
-    for _i, option in ipairs(options) do
+    for _i, option in ipairs(self:supportedOptions()) do
         local value = self.values[option.name]
         local enabled = not option.enabled_func or option.enabled_func(self)
         local default = defaultValue(option)

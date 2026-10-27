@@ -2,7 +2,8 @@
 
 A KOReader plugin that adds a menu for Knuth–Plass paragraph line breaking:
 the line-breaking mode, word- and letter-space limits, fit tolerances, line
-penalties, emergency stretch and hyphenation penalties.
+penalties, emergency stretch, hyphenation penalties, and the line breaking of
+ragged (left-aligned, right-aligned and centered) text.
 
 It needs a CREngine that has Knuth–Plass paragraph formatting (the
 `knuth-plass` branch of [spfenwick/crengine](https://github.com/spfenwick/crengine)).
@@ -48,6 +49,10 @@ settings").
 | Emergency & ending | `crengine.style.justify.emergency.stretch.percent`, `.last.line.min.percent` | 6% / 33% |
 | Hyphen penalties | `crengine.style.justify.hyphen.penalty`, `.explicit.hyphen.penalty` | 0 / 0 |
 | Repeated-hyphen penalties | `crengine.style.justify.double.hyphen.demerits`, `.final.hyphen.demerits` | 0 / 0 |
+| Ragged text | `crengine.style.ragged.width.percent`, `crengine.style.ragged.hyphen.penalty` | 15% / 100 |
+
+Ragged text only appears with engines that have it (the menu probes
+`crengine.style.ragged.width.percent`).
 
 When no layout of a paragraph fits within the tolerances and the emergency
 stretch, the engine makes a last pass that accepts looser lines, so the
@@ -87,6 +92,24 @@ lines:
 
 (Engines before this change used a flat cost that was too weak to move most
 endings, and above about 33% it made no visible difference.)
+
+Ragged paragraphs keep their natural word spacing (never condensed), and
+their line breaks are chosen so that line lengths are as even as possible.
+The rag width sets how far short of the full width a line may fall before
+it counts as loose (0 leaves these paragraphs to greedy line breaking), and
+the ragged hyphen penalty is on a much smaller scale than the justified
+ones. Two books forced to left alignment, at 22px on a 600px-wide screen:
+
+| Setting | Hyphenated lines per 1000 | Lines more than 15% short | Pages |
+| --- | --- | --- | --- |
+| greedy | 154 / 44 | 0.5% / 0% | 3905 / 701 |
+| 10% / 100 (even) | 139 / 73 | 0.7% / 2.0% | 4006 / 741 |
+| 15% / 100 (balanced, default) | 53 / 42 | 0.6% / 0.6% | 4021 / 741 |
+| 15% / 200 (fewer hyphens) | — / 34 | — / 0.6% | — / 742 |
+| 20% / 100 | 19 / 18 | 4.8% / 10.8% | 4042 / 742 |
+
+The extra pages come from greedy breaking condensing spaces in ragged text
+too.
 
 ## Tests
 

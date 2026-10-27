@@ -102,11 +102,16 @@ local function settings(values)
     }
 end
 
-local function makeUI(probe)
+-- probe: what the engine returns for the Knuth–Plass capability property;
+-- ragged: whether it also has the ragged text properties.
+local function makeUI(probe, ragged)
     local cre = { props = {} }
     function cre:getStringProperty(name)
         if name == "crengine.style.justify.tolerance" then
             return probe
+        end
+        if ragged and name == "crengine.style.ragged.width.percent" then
+            return "15"
         end
         return ""
     end
@@ -342,6 +347,61 @@ for name, action in pairs(registered_actions) do
         assert(#action.args == #action.toggle, name)
     end
 end
-assert(action_count == 10, action_count)
+assert(action_count == 11, action_count)
+
+-- Ragged text: only offered by engines that have it.
+G_reader_settings = settings()
+do
+    -- A Knuth engine without it (above, too): not applied, not shown.
+    local ui, cre = makeUI("200", false)
+    local plugin = Plugin:new{ ui = ui }
+    plugin:onReadSettings(ui.doc_settings)
+    assert(plugin.active)
+    assert(cre.props["crengine.style.ragged.width.percent"] == nil)
+    assert(plugin:onSetRaggedText({ 10, 100 }) == nil)
+    assert(cre.props["crengine.style.ragged.width.percent"] == nil)
+    assert(ui.doc_settings.store.copt_ragged_text == nil)
+    assert(ui.document.configurable.ragged_text == nil)
+    for _, row in ipairs(plugin:getDialogButtons()) do
+        assert(not row[1].text:find("Ragged text", 1, true), row[1].text)
+    end
+end
+do
+    local ui, cre = makeUI("200", true)
+    ui.doc_settings = settings{ copt_ragged_text = { 12, 300 } }
+    local plugin = Plugin:new{ ui = ui }
+    plugin:onReadSettings(ui.doc_settings)
+    -- Every engine property the plugin owns, now with ragged text.
+    local count = 0
+    for _ in pairs(cre.props) do count = count + 1 end
+    assert(count == 18, count)
+    assert(cre.props["crengine.style.ragged.width.percent"] == 12)
+    assert(cre.props["crengine.style.ragged.hyphen.penalty"] == 300)
+    -- Its row comes last among the settings, with a custom value shown.
+    local buttons = plugin:getDialogButtons()
+    assert(#buttons == 22, #buttons)
+    assert(buttons[19][1].text == "Ragged text: 12% / 300 (custom)", buttons[19][1].text)
+    local labels = {}
+    for i, button in ipairs(buttons[20]) do labels[i] = button.text end
+    assert(table.concat(labels, "|") == "greedy|even|balanced ★|fewer hyphens|…", table.concat(labels, "|"))
+    -- Presets apply both properties and are saved with the book.
+    buttons[20][1].callback()
+    assert(cre.props["crengine.style.ragged.width.percent"] == 0)
+    assert(cre.props["crengine.style.ragged.hyphen.penalty"] == 100)
+    assert(equals(ui.doc_settings.store.copt_ragged_text, { 0, 100 }))
+    assert(plugin:onSetRaggedText({ 15, 200 }))
+    assert(cre.props["crengine.style.ragged.hyphen.penalty"] == 200)
+    assert(notifications[#notifications] == "Ragged text: fewer hyphens", notifications[#notifications])
+    -- Profiles capture it.
+    ui.profiles = {
+        ui = ui,
+        getProfileFromCurrentBookSettings = function(_, name)
+            return { settings = { name = name, order = {} } }
+        end,
+    }
+    plugin:onReaderReady()
+    local profile = ui.profiles:getProfileFromCurrentBookSettings("ragged")
+    assert(equals(profile.ragged_text, { 15, 200 }))
+end
 
 print("plugin tests passed")
