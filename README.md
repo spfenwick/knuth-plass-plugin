@@ -14,10 +14,10 @@ With a stock engine the plugin stays inactive and the menu entry shows
 
 Copy `knuthplass.koplugin` into KOReader's `plugins/` folder and restart
 KOReader. Top menu → Typeset (the document menu) → "Line breaking" opens a
-dialog with all the settings in one place. Each setting has a row of
-presets, each with its values in smaller text below its name (large ones
-shortened, as 3k or 1.5M), with the current one highlighted, and "…" for a
-custom value. The dialog scrolls one whole setting at a time. Tap
+dialog with all the settings in one place, laid out like KOReader's bottom
+menu: one row per setting, its name in a column on the left and its
+presets on the right, with the current one highlighted and "…" for a
+custom value. Tap
 a setting's name for an explanation, and ✕ (or tap outside) to close. The
 dialog can also be assigned to a gesture ("Knuth–Plass justification
 settings").
@@ -28,8 +28,8 @@ settings").
   `copt_line_breaking_mode`), like KOReader's own bottom-menu settings.
 - Long-press a preset (or "…" while a custom value is in use), or use "Set
   as default" in a custom value dialog, to make it the default for books
-  without their own value. The default is marked ★; a custom default is
-  also shown next to the setting's name. Long-press a setting's name to
+  without their own value. The default is marked ★ (a custom default
+  marks "…"). Long-press a setting's name to
   restore its built-in default, or use "Reset all defaults" at the bottom
   of the dialog.
 - Every setting is a Dispatcher action, so it can be assigned to gestures and
@@ -50,7 +50,7 @@ settings").
 | Line-quality penalties | `crengine.style.justify.line.penalty`, `.adjacent.demerits` | 10 / 10000 |
 | Emergency & ending | `crengine.style.justify.emergency.stretch.percent`, `.last.line.min.percent` | 6% / 33% |
 | Hyphen penalties | `crengine.style.justify.hyphen.penalty`, `.explicit.hyphen.penalty` | 3000 / 3000 (moderate) |
-| Repeated-hyphen penalties | `crengine.style.justify.double.hyphen.demerits`, `.final.hyphen.demerits` | 3000000 / 1500000 (moderate) |
+| Repeated-hyphen penalties | `crengine.style.justify.double.hyphen.demerits`, `.final.hyphen.demerits` | 36000000 / 18000000 (moderate) |
 | Ragged text | `crengine.style.ragged.width.percent`, `crengine.style.ragged.hyphen.penalty` | 15% / 100 |
 
 Ragged text only appears with engines that have it (the menu probes
@@ -65,19 +65,27 @@ screens was about half of them, and then none of these settings applied.)
 
 The hyphen penalties only choose between layouts that fit the word-space
 limits; where a line cannot be filled without breaking a word, the hyphen
-stays. Measured on a long non-fiction book at 22px on a 600px-wide screen
-with the default word-space limits:
+stays. A hyphen penalty counts squared (3000 costs 9000000), while the
+repeated-hyphen penalties are added as they are, which is why they are so
+much larger. Their presets follow TeX's ratios: a second hyphen in a row
+costs 4 times, and a hyphen before the last line twice, a hyphen at the
+matching hyphen penalty. (Engines before the cap on them was raised from
+10000000 to 1000000000 clamp the larger presets.)
 
-| Hyphen penalty | Hyphenated lines |
-| --- | --- |
-| 0 (free) | 25.9% |
-| 1000 (light) | 18.3% |
-| 3000 (moderate) | 11.4% |
-| 10000 (strong) | 7.6% |
+Measured on a long non-fiction book at 22px on a 600px-wide screen with
+the default word-space limits (consecutive pairs per 1000 lines):
 
-Repeated-hyphen demerits of 1000000 / 3000000 / 10000000 cut consecutive
-hyphenated line pairs by about half / two thirds / three quarters. Values
-much below these presets have little visible effect.
+| Hyphen penalty | Hyphenated lines, repeated free | Pairs, repeated free | Hyphenated lines, repeated moderate | Pairs, repeated moderate |
+| --- | --- | --- | --- | --- |
+| 0 (free) | 25.3% | 67.4 | 18.5% | 14.8 |
+| 1000 (light) | 12.1% | 18.7 | 11.7% | 14.9 |
+| 3000 (moderate, default) | 9.1% | 15.5 | 9.0% | 14.8 |
+| 10000 (strong) | 8.1% | 15.3 | 8.1% | 14.8 |
+
+Once hyphens have a penalty, repeated-hyphen penalties remove few pairs, and
+the strong preset no more than moderate: the rest have no alternative
+within the word-space limits. (Looser limits don't help: they let more
+lines hyphenate.)
 
 Ending minimum is a preference, not a rule: its cost grows with the square
 of how far the final line falls short, and it only chooses between layouts

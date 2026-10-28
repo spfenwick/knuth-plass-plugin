@@ -42,6 +42,8 @@ function ButtonDialog:onClose()
     if self.tap_close_callback then self.tap_close_callback() end
     self.closed = true
 end
+stub("device", { screen = { getWidth = function() return 1000 end } })
+stub("ui/size", { padding = { large = 10 } })
 stub("ui/widget/titlebar", { new = function(_, o) return o end })
 stub("ui/font", { getFace = function(_, name, size) return { name = name, size = size } end })
 stub("ui/widget/textwidget", {
@@ -170,8 +172,8 @@ do
     assert(cre.props["crengine.style.justify.space.stretch.percent"] == 35)
     assert(cre.props["crengine.style.justify.hyphen.penalty"] == 3000)
     assert(cre.props["crengine.style.justify.explicit.hyphen.penalty"] == 3000)
-    assert(cre.props["crengine.style.justify.double.hyphen.demerits"] == 3000000)
-    assert(cre.props["crengine.style.justify.final.hyphen.demerits"] == 1500000)
+    assert(cre.props["crengine.style.justify.double.hyphen.demerits"] == 36000000)
+    assert(cre.props["crengine.style.justify.final.hyphen.demerits"] == 18000000)
     assert(cre.props["crengine.style.justify.tracking.delta.max.bp"] == 50)
     -- Page-level and kerning settings belong to other builds.
     assert(cre.props["crengine.style.justify.refinement.passes"] == nil)
@@ -211,6 +213,9 @@ do
     local ui, cre, events = makeUI("200")
     local plugin = Plugin:new{ ui = ui }
     plugin:onReadSettings(ui.doc_settings)
+    -- (The strong preset needs an engine whose cap is 1000000000.)
+    assert(plugin:onSetJustificationHyphenDemerits({ 400000000, 200000000 }))
+    assert(cre.props["crengine.style.justify.double.hyphen.demerits"] == 400000000)
     assert(plugin:onSetJustificationHyphenDemerits({ 10000, 5000 }))
     assert(cre.props["crengine.style.justify.double.hyphen.demerits"] == 10000)
     assert(cre.props["crengine.style.justify.final.hyphen.demerits"] == 5000)
@@ -238,23 +243,29 @@ do
     local dialog = shown[#shown]
     assert(dialog == plugin.dialog)
 
-    -- Two rows per setting: its name, then its presets (and "…").
+    -- One row per setting, as in the bottom menu: its name in a left
+    -- column, then its presets (and "…"). findRow returns the presets.
     local function findRow(buttons, heading)
-        for i, row in ipairs(buttons) do
-            if row[1].text == heading then return buttons[i + 1] end
+        for _, row in ipairs(buttons) do
+            if row[1].text == heading then
+                return { select(2, unpack(row)) }
+            end
         end
     end
-    assert(#dialog.buttons == 20, #dialog.buttons)
-    assert(dialog.setting_count == 9, dialog.setting_count)
-    -- Preset rows: two-line buttons, all the same height (name line and
-    -- smaller numbers line), each with its own id.
-    local ids, preset_height = {}, nil
-    for i = 2, 2 * dialog.setting_count, 2 do
+    assert(#dialog.buttons == 11, #dialog.buttons)
+    assert(dialog.width_factor == 0.95)
+    -- Every button of a setting row has the same height (one line of a
+    -- name) and its own id; names share one column width, without a
+    -- separator before the presets.
+    local ids = {}
+    for i = 1, 9 do
+        local name = dialog.buttons[i][1]
+        assert(name.setting_name and name.width == 237 and name.no_vertical_sep, i)
         for _, button in ipairs(dialog.buttons[i]) do
-            assert(button.two_line and button.id and not ids[button.id], button.id)
+            assert(button.id and not ids[button.id], button.id)
             ids[button.id] = true
-            preset_height = preset_height or button.height
-            assert(button.height == preset_height and preset_height == (18 + 6) + (14 + 6))
+            assert(button.height == 20 + 6)
+            assert(button.numbers == nil and not button.two_line)
         end
     end
     for i, row in ipairs(dialog.buttons) do
@@ -265,11 +276,14 @@ do
     -- In greedy mode only the mode row is enabled.
     assert(findRow(dialog.buttons, "Line breaking")[2].enabled == true)
     assert(findRow(dialog.buttons, "Fit tolerance")[1].enabled == false)
-    -- The current preset is highlighted; a custom value shows in the name.
+    -- (Names of disabled settings are grayed but still open their help.)
+    assert(dialog.buttons[2][1].text == "Word-space limits" and dialog.buttons[2][1].dimmed)
+    assert(not dialog.buttons[1][1].dimmed)
+    -- The current preset is highlighted.
     local mode_row = findRow(dialog.buttons, "Line breaking")
     assert(mode_row[1].background and not mode_row[2].background)
-    assert(findRow(dialog.buttons, "Word-space limits: −40% / +75% (custom)") == nil)
-    assert(findRow(dialog.buttons, "Word-space limits") ~= nil) -- {40, 75} is the "loose" preset
+    local ws = findRow(dialog.buttons, "Word-space limits") -- {40, 75} is the "loose" preset
+    assert(ws[3].background and not ws[#ws].background)
 
     -- Tapping a preset applies it and refreshes the dialog in place.
     local count = #notifications
@@ -282,44 +296,43 @@ do
     assert(entry.text_func() == "Line breaking: Knuth–Plass")
 
     plugin:setValue("justification_tolerance", { 70, 300 }, true)
-    local tol_row = findRow(dialog.buttons, "Fit tolerance: 70 / 300 (custom)")
+    local tol_row = findRow(dialog.buttons, "Fit tolerance")
     assert(tol_row and tol_row[#tol_row].text == "…" and tol_row[#tol_row].background)
 
-    -- Each preset shows its name (the default marked with a star), and
-    -- its numbers on a second line ("name numbers" here).
+    -- Each preset shows just its name, the default marked with a star.
     local function texts(row)
         local t = {}
         for i, button in ipairs(row) do
-            t[i] = button.text .. (button.numbers and " " .. button.numbers or "")
+            t[i] = button.text
         end
         return table.concat(t, "|")
     end
     assert(texts(findRow(dialog.buttons, "Line breaking")) == "greedy|Knuth–Plass ★")
-    assert(texts(tol_row) == "strict 50/100|balanced ★ 100/200|forgiving 200/500|…", texts(tol_row))
+    assert(texts(tol_row) == "strict|balanced ★|forgiving|…", texts(tol_row))
     assert(texts(findRow(dialog.buttons, "Word-space limits"))
-        == "tight ★ −25%/+35%|balanced −33%/+50%|loose −40%/+75%|…")
-    -- A custom default is shown in the name and marks "…".
-    local hyph_row = findRow(dialog.buttons, "Hyphen penalties (default: 50 / 50)")
-    assert(hyph_row and texts(hyph_row) == "free|light 1k/1k|moderate 3k/3k|strong 10k/10k|… ★", texts(hyph_row))
-    assert(texts(findRow(dialog.buttons, "Repeated-hyphen penalties: 10000 / 5000 (custom)"))
-        == "free|light 1M/500k|moderate ★ 3M/1.5M|strong 10M/5M|…")
+        == "tight ★|balanced|loose|…")
+    -- A custom default marks "…".
+    local hyph_row = findRow(dialog.buttons, "Hyphen penalties")
+    assert(hyph_row and texts(hyph_row) == "free|light|moderate|strong|… ★", texts(hyph_row))
+    assert(texts(findRow(dialog.buttons, "Repeated-hyphen penalties"))
+        == "free|light|moderate ★|strong|…")
     assert(texts(findRow(dialog.buttons, "Letter-space smoothness"))
-        == "off|strict 0.25%|smooth ★ 0.50%|relaxed 1.00%|…")
+        == "off|strict|smooth ★|relaxed|…")
     assert(texts(findRow(dialog.buttons, "Letter-space limits"))
-        == "off|fallback ★ −1%/+0%|…")
+        == "off|fallback ★|…")
 
     -- Long-press makes a preset the default and refreshes the dialog.
     local reinits = dialog.reinits
     tol_row[1].hold_callback()
     assert(equals(G_reader_settings.store.copt_justification_tolerance, { 50, 100 }))
     assert(dialog.reinits == reinits + 1)
-    tol_row = findRow(dialog.buttons, "Fit tolerance: 70 / 300 (custom)")
-    assert(texts(tol_row) == "strict ★ 50/100|balanced 100/200|forgiving 200/500|…", texts(tol_row))
+    tol_row = findRow(dialog.buttons, "Fit tolerance")
+    assert(texts(tol_row) == "strict ★|balanced|forgiving|…", texts(tol_row))
     -- Long-press on "…" makes the current custom value the default.
     tol_row[#tol_row].hold_callback()
     assert(equals(G_reader_settings.store.copt_justification_tolerance, { 70, 300 }))
-    tol_row = findRow(dialog.buttons, "Fit tolerance: 70 / 300 (custom)")
-    assert(texts(tol_row) == "strict 50/100|balanced 100/200|forgiving 200/500|… ★", texts(tol_row))
+    tol_row = findRow(dialog.buttons, "Fit tolerance")
+    assert(texts(tol_row) == "strict|balanced|forgiving|… ★", texts(tol_row))
     -- "…" has no long-press when the current value is a preset.
     assert(findRow(dialog.buttons, "Line breaking")[1].hold_callback ~= nil)
     local ws_row = findRow(dialog.buttons, "Word-space limits")
@@ -327,11 +340,11 @@ do
 
     -- Long-press on a name restores the built-in default.
     for _, row in ipairs(dialog.buttons) do
-        if row[1].text == "Fit tolerance: 70 / 300 (custom)" then row[1].hold_callback() break end
+        if row[1].text == "Fit tolerance" then row[1].hold_callback() break end
     end
     assert(G_reader_settings.store.copt_justification_tolerance == nil)
-    tol_row = findRow(dialog.buttons, "Fit tolerance: 70 / 300 (custom)")
-    assert(texts(tol_row) == "strict 50/100|balanced ★ 100/200|forgiving 200/500|…", texts(tol_row))
+    tol_row = findRow(dialog.buttons, "Fit tolerance")
+    assert(texts(tol_row) == "strict|balanced ★|forgiving|…", texts(tol_row))
 
     -- "Reset all defaults" asks first, then clears every default.
     local reset = dialog.buttons[#dialog.buttons][1]
@@ -418,16 +431,17 @@ do
     assert(count == 18, count)
     assert(cre.props["crengine.style.ragged.width.percent"] == 12)
     assert(cre.props["crengine.style.ragged.hyphen.penalty"] == 300)
-    -- Its row comes last among the settings, with a custom value shown.
+    -- Its row comes last among the settings, with "…" selected.
     local buttons = plugin:getDialogButtons()
-    assert(#buttons == 22, #buttons)
-    assert(buttons[19][1].text == "Ragged text: 12% / 300 (custom)", buttons[19][1].text)
+    assert(#buttons == 12, #buttons)
+    assert(buttons[10][1].text == "Ragged text", buttons[10][1].text)
     local labels = {}
-    for i, button in ipairs(buttons[20]) do labels[i] = button.text .. (button.numbers and " " .. button.numbers or "") end
-    assert(table.concat(labels, "|") == "greedy|even 10%/100|balanced ★ 15%/100|fewer hyphens 15%/200|…",
+    for i, button in ipairs(buttons[10]) do labels[i] = button.text end
+    assert(table.concat(labels, "|") == "Ragged text|greedy|even|balanced ★|fewer hyphens|…",
         table.concat(labels, "|"))
+    assert(buttons[10][#buttons[10]].background) -- {12, 300} is custom
     -- Presets apply both properties and are saved with the book.
-    buttons[20][1].callback()
+    buttons[10][2].callback()
     assert(cre.props["crengine.style.ragged.width.percent"] == 0)
     assert(cre.props["crengine.style.ragged.hyphen.penalty"] == 100)
     assert(equals(ui.doc_settings.store.copt_ragged_text, { 0, 100 }))
