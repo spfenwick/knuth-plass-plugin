@@ -72,7 +72,8 @@ env:
     [
       {"target": "kobo", "image": "koreader/kokobo:latest"},
       {"target": "kindlepw2", "image": "koreader/kokindle:latest"},
-      {"target": "kindlehf", "image": "koreader/kokindle:latest"}
+      {"target": "kindlehf", "image": "koreader/kokindle:latest"},
+      {"target": "remarkable", "image": "koreader/koremarkable:latest"}
     ]
 
 jobs:

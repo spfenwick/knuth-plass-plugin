@@ -139,11 +139,11 @@ complete and its checksum matches, and it takes effect after a restart.
 
 Once the plugin is up to date, the check also looks for a Knuth–Plass
 engine build for this device and KOReader version, and installs it the same
-way. Builds are made for KOReader's `kobo`, `kindlepw2` and `kindlehf`
-packages; "Engine information" (or the dialog's "Engine" row) shows which
-one a device uses.
-(A Kindle Voyage uses `kindlepw2`; a Paperwhite 11 on firmware 5.16.3 or
-later uses `kindlehf`.)
+way. Builds are made for KOReader's `kobo`, `kindlepw2`, `kindlehf` and
+`remarkable` packages; "Engine information" (or the dialog's "Engine" row)
+shows which one a device uses. (A Kindle Voyage uses `kindlepw2`; a
+Paperwhite 11 on firmware 5.16.3 or later uses `kindlehf`; a reMarkable 1
+or 2 uses `remarkable`.)
 
 - The engine only has to agree with the rest of KOReader where they meet:
   `cre.cpp` (the functions KOReader's Lua code calls) and the libraries it
