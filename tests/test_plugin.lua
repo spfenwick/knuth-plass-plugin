@@ -1,5 +1,8 @@
 -- Exercises knuthplass.koplugin against stubbed KOReader modules.
 
+-- KOReader puts the plugin's folder on package.path while loading it.
+package.path = "knuthplass.koplugin/?.lua;" .. package.path
+
 local function stub(name, value)
     package.loaded[name] = value
 end
@@ -22,9 +25,11 @@ stub("ui/widget/notification", {
     end,
 })
 local shown = {}
+local scheduled = {}
 stub("ui/uimanager", {
     show = function(_, widget) table.insert(shown, widget) end,
     setDirty = function() end,
+    scheduleIn = function(_, delay, fn) table.insert(scheduled, { delay = delay, fn = fn }) end,
 })
 stub("ffi/blitbuffer", { COLOR_LIGHT_GRAY = "lightgray" })
 local ButtonDialog = {}
@@ -252,7 +257,7 @@ do
             end
         end
     end
-    assert(#dialog.buttons == 11, #dialog.buttons)
+    assert(#dialog.buttons == 12, #dialog.buttons)
     assert(dialog.width_factor == 0.95)
     -- Every button of a setting row has the same height (one line of a
     -- name) and its own id; names share one column width, without a
@@ -433,7 +438,7 @@ do
     assert(cre.props["crengine.style.ragged.hyphen.penalty"] == 300)
     -- Its row comes last among the settings, with "…" selected.
     local buttons = plugin:getDialogButtons()
-    assert(#buttons == 12, #buttons)
+    assert(#buttons == 13, #buttons)
     assert(buttons[10][1].text == "Ragged text", buttons[10][1].text)
     local labels = {}
     for i, button in ipairs(buttons[10]) do labels[i] = button.text end
@@ -465,6 +470,56 @@ do
     stub("gettext", function(s) return s end)
     local meta = dofile("knuthplass.koplugin/_meta.lua")
     assert(type(meta.version) == "string" and meta.version:match("^%d+%.%d+%.%d+$"), tostring(meta.version))
+end
+
+-- Updater: versions, zip paths, the dialog row and the automatic check.
+do
+    local Updater = require("knuthplass_updater")
+    assert(Updater.parseVersion("v1.2.3")[3] == 3)
+    assert(Updater.parseVersion("1.2") == nil and Updater.parseVersion(nil) == nil)
+    assert(Updater.isNewer("0.10.0", "0.9.9"))
+    assert(Updater.isNewer("v1.0.0", "0.9.9"))
+    assert(not Updater.isNewer("0.1.0", "0.1.0"))
+    assert(not Updater.isNewer("0.1.0", "0.2.0"))
+    assert(not Updater.isNewer("junk", "0.1.0"))
+
+    assert(Updater.entryPath("knuthplass.koplugin/main.lua") == "main.lua")
+    assert(Updater.entryPath("knuthplass.koplugin/sub/x.lua") == "sub/x.lua")
+    assert(Updater.entryPath("knuthplass.koplugin/") == nil)
+    assert(Updater.entryPath("main.lua") == nil)
+    assert(Updater.entryPath("knuthplass.koplugin/../evil.lua") == nil)
+    assert(Updater.entryPath("knuthplass.koplugin/a/../../evil.lua") == nil)
+
+    G_reader_settings = settings()
+    assert(Updater.getMode() == "notify")
+    Updater.setMode("bogus")
+    assert(Updater.getMode() == "notify")
+
+    -- The dialog row cycles the mode.
+    local ui = makeUI("200")
+    local plugin = Plugin:new{ ui = ui, version = "0.1.0", path = "/plugins/knuthplass.koplugin" }
+    plugin:onReadSettings(ui.doc_settings)
+    plugin:showDialog()
+    local rows = plugin.dialog.buttons
+    local row = rows[#rows - 1]
+    assert(row[1].text == "Check for updates (0.1.0)", row[1].text)
+    assert(row[2].text == "Automatic updates: notify", row[2].text)
+    row[2].callback()
+    assert(Updater.getMode() == "install")
+    rows = plugin.dialog.buttons
+    assert(rows[#rows - 1][2].text == "Automatic updates: install", rows[#rows - 1][2].text)
+    rows[#rows - 1][2].callback()
+    assert(Updater.getMode() == "off")
+
+    -- Opening a book schedules one automatic check per session; with
+    -- automatic updates off it returns without touching the network.
+    scheduled = {}
+    Updater.scheduled = nil
+    plugin:onReaderReady()
+    plugin:onReaderReady()
+    assert(#scheduled == 1, #scheduled)
+    scheduled[1].fn()
+    assert(G_reader_settings.store.knuthplass_updates.last_check == nil)
 end
 
 print("plugin tests passed")

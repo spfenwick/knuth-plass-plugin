@@ -20,6 +20,8 @@ local util = require("util")
 local _ = require("gettext")
 local C_ = _.pgettext
 local T = require("ffi/util").template
+-- A name of its own: plugins share package.loaded.
+local Updater = require("knuthplass_updater")
 
 -- A Knuth-capable engine fills in a default for this property when a
 -- document view is created; a stock engine returns an empty string.
@@ -481,6 +483,14 @@ function KnuthPlass:onReaderReady()
     if self.active then
         self:hookProfiles()
     end
+    -- Once per session, after the book is shown. It returns at once unless
+    -- automatic updates are on, a day has passed and the device is online.
+    if not Updater.scheduled then
+        Updater.scheduled = true
+        UIManager:scheduleIn(10, function()
+            Updater.check(self, false)
+        end)
+    end
 end
 
 -- Let Profiles' "create from current book settings" include our settings.
@@ -827,6 +837,39 @@ function KnuthPlass:getDialogButtons()
             font_bold = false,
             enabled = false,
             callback = function() end,
+        },
+    })
+    table.insert(rows, {
+        {
+            text = T(_("Check for updates (%1)"), self.version or "?"),
+            font_size = NAME_FONT_SIZE,
+            font_bold = false,
+            enabled = self.path ~= nil,
+            callback = function()
+                Updater.check(self, true)
+            end,
+        },
+        {
+            text = T(_("Automatic updates: %1"), Updater.modeText(Updater.getMode())),
+            font_size = NAME_FONT_SIZE,
+            font_bold = false,
+            callback = function()
+                -- Cycles off → notify → install.
+                local mode = Updater.getMode()
+                for i, m in ipairs(Updater.modes) do
+                    if m == mode then
+                        Updater.setMode(Updater.modes[i % #Updater.modes + 1])
+                        break
+                    end
+                end
+                self:refreshDialog()
+            end,
+            hold_callback = function()
+                local InfoMessage = require("ui/widget/infomessage")
+                UIManager:show(InfoMessage:new{
+                    text = _("When KOReader is online, the plugin checks for a new version once a day.\n\noff: never\nnotify: ask before installing\ninstall: install it, ready for the next restart"),
+                })
+            end,
         },
     })
     table.insert(rows, {

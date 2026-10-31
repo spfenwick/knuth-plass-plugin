@@ -121,6 +121,22 @@ ones. Two books forced to left alignment, at 22px on a 600px-wide screen:
 The extra pages come from greedy breaking condensing spaces in ragged text
 too.
 
+## Updates
+
+The dialog's "Check for updates" row looks for a newer release of the
+plugin on GitHub. "Automatic updates" (tap to change, long-press for help)
+sets what happens once a day when KOReader is already online:
+
+- off: nothing
+- notify (the default): asks before installing
+- install: installs it
+
+An update is unpacked next to the plugin and swapped in only once it is
+complete and its checksum matches, and it takes effect after a restart.
+
+To publish a release, set `version` in `_meta.lua` and push a matching
+tag (`v0.2.0`). The release workflow tests, packages and publishes it.
+
 ## Tests
 
 ```sh
