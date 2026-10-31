@@ -157,15 +157,30 @@ or 2 uses `remarkable`.)
   (which fails if a library or function it needs is missing from this
   KOReader) and checks it has every function of the running engine. A build
   that fails isn't offered again for this KOReader version.
-- KOReader's own engine is kept as `libs/libkoreader-cre.so.stock`, and the
-  "Restore standard engine" (Tools menu or dialog) puts it back.
-- Until a book has opened with a new engine, KOReader starts in the file
-  browser (so the plugin loads before the engine). If the engine fails to
-  load, or KOReader stops twice before a book opened with it, the standard
-  engine is put back and that build isn't offered again for this KOReader
-  version.
-- Updating KOReader replaces the engine with its standard one; the next
-  check offers the Knuth–Plass engine again.
+- KOReader's own engine (`libs/libkoreader-cre.so`) is never changed. The
+  Knuth–Plass engine is kept in `knuthplass/` in KOReader's data folder
+  (`koreader/knuthplass/` on Kindle, Kobo and reMarkable), and a user patch
+  the plugin installs, `patches/1-knuthplass-engine.lua`, makes KOReader
+  load it from there. It runs at the very start, before anything uses the
+  engine. "Restore standard engine" (Tools menu or dialog) removes both.
+  (If user patches are turned off, the plugin sets this up as it loads,
+  which is in time only when KOReader starts in the file browser.)
+- Until a book has opened with a new engine, the patch counts the times
+  it's loaded. If it fails to load, or KOReader stops twice before a book
+  opened with it, KOReader's own engine is used from then on, and that
+  build isn't offered again for this KOReader version.
+- After a KOReader update, the patch checks the engine again on the first
+  start, in separate processes: it must load with the new version, and have
+  every function KOReader's own engine has (which matches KOReader's Lua
+  code). If it does, it's kept, and counted again until a book has opened
+  with it. If it doesn't, KOReader's own engine is used, and "Check for
+  updates" offers a matching build. (If KOReader's own engine can't be
+  checked, KOReader's own is used for that version, and "Check for updates"
+  checks and reinstates the engine without downloading it again.)
+- Versions before 0.4.0 replaced `libs/libkoreader-cre.so`. On the first
+  start with 0.4.0 or later, KOReader's own engine is put back (from
+  `libkoreader-cre.so.stock`) and the Knuth–Plass engine moves to
+  `knuthplass/`.
 
 To publish a release, set `version` in `_meta.lua` and push a matching
 tag (`v0.2.0`). The release workflow tests, packages and publishes it.

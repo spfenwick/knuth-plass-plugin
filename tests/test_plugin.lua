@@ -30,6 +30,7 @@ stub("ui/uimanager", {
     show = function(_, widget) table.insert(shown, widget) end,
     setDirty = function() end,
     scheduleIn = function(_, delay, fn) table.insert(scheduled, { delay = delay, fn = fn }) end,
+    nextTick = function(_, fn) fn() end,
 })
 stub("ffi/blitbuffer", { COLOR_LIGHT_GRAY = "lightgray" })
 local ButtonDialog = {}
@@ -68,12 +69,29 @@ stub("logger", { info = function() end, dbg = function() end, warn = function() 
 -- The engine module's files: a folder with no libs/libkoreader-cre.so.stock.
 local test_dir = os.getenv("TMPDIR") or "/tmp"
 stub("libs/libkoreader-lfs", { currentdir = function() return test_dir end })
-stub("version", { getCurrentRevision = function() return "v2026.07.2-299-g8012773_2026-10-30" end })
+local koreader_rev = "v2026.07.2-299-g8012773_2026-10-30"
+stub("version", { getCurrentRevision = function() return koreader_rev end })
+stub("datastorage", {
+    getDataDir = function() return test_dir end,
+    getPatchesDir = function() return test_dir .. "/patches" end,
+})
+stub("userpatch", { arePatchesDisabled = function() return false end })
 stub("ffi/util", {
     template = function(fmt, ...)
         local args = { ... }
         return (fmt:gsub("%%(%d)", function(i) return tostring(args[tonumber(i)]) end))
     end,
+    -- A "child process" that runs at once, here, writing to a table.
+    runInSubProcess = function(func)
+        local pipe = {}
+        func(1, pipe)
+        return 1, pipe
+    end,
+    writeToFD = function(pipe, data) table.insert(pipe, data) end,
+    isSubProcessDone = function() return true end,
+    readAllFromFD = function(pipe) return table.concat(pipe) end,
+    usleep = function() end,
+    terminateSubProcess = function() end,
 })
 
 local function deepcopy(o)
@@ -90,6 +108,7 @@ local function equals(a, b)
     return true
 end
 stub("util", {
+    makePath = function(path) return os.execute("mkdir -p '" .. path .. "'") end,
     tableDeepCopy = deepcopy,
     tableEquals = equals,
     arrayContains = function(t, v)
@@ -556,127 +575,297 @@ do
     assert(Engine.findBuild({ builds = { base1 = entry("abc") } }, "base1", "kobo") == nil)
     assert(Engine.buildId(manifest.builds.fpA.kobo) == "abc/lib-abc.so")
 
-    -- A KOReader folder of our own, with the standard engine.
+    -- A KOReader folder of our own, with KOReader's engine.
+    local Loader = require("knuthplass_loader")
     local dir = os.tmpname()
     os.remove(dir)
     assert(os.execute("mkdir -p '" .. dir .. "/libs'"))
     test_dir = dir
-    local lib = dir .. "/libs/libkoreader-cre.so"
+    local plugin_path = "knuthplass.koplugin"
+    local standard = dir .. "/libs/libkoreader-cre.so"
+    local lib = dir .. "/knuthplass/libkoreader-cre.so"
+    local patch = dir .. "/patches/1-knuthplass-engine.lua"
     local function read(path)
         local f = io.open(path, "rb")
         if not f then return nil end
         local d = f:read("*a"); f:close(); return d
     end
     local function write(path, d) local f = assert(io.open(path, "wb")); f:write(d); f:close() end
-    write(lib, "\127ELF standard")
+    write(standard, "\127ELF standard")
     -- Checksums: the builds below hash to their own names.
     stub("ffi/sha2", { sha256 = function(d) return (d:match("^\127ELF (%w+)") or "x"):rep(64):sub(1, 64) end })
     local function build(name)
         local data = "\127ELF " .. name
-        return { commit = name, url = "https://x", sha256 = name:rep(64):sub(1, 64), size = #data }, data
+        return { commit = name, url = "https://x", sha256 = name:rep(64):sub(1, 64), size = #data,
+                 file = "lib-" .. name .. ".so" }, data
     end
-    -- A stand-in CreDocument whose engine fails to load when it's "bad".
-    local CreDocument = {}
-    function CreDocument.engineInit()
-        if read(lib):find("bad", 1, true) then error("undefined symbol") end
-        return "cre"
+    -- Loading libraries: the Knuth–Plass engine fails to load when it's
+    -- "bad"; KOReader's comes from its usual loaders.
+    local real_loadlib = package.loadlib
+    -- Like luaopen_cre: a module, and methods in registry metatables.
+    -- KOReader's own engine has cre.newDocView, cre.getVersion,
+    -- credocument:getStringProperty and credocument:close (and, when
+    -- standard_highlight is set, a crehighlight metatable). A "lacking"
+    -- engine lacks cre.getVersion, a "nomethod" one credocument:close; an
+    -- "explode" one raises an error as it loads.
+    local standard_broken = false
+    local standard_highlight = false
+    package.loadlib = function(path)
+        local data = read(path) or ""
+        if data:find("bad", 1, true) then return nil, "undefined symbol: FT_Bad" end
+        if data:find("explode", 1, true) then error("boom") end
+        if standard_broken and path == standard then return nil, "cannot open" end
+        return function()
+            local registry = debug.getregistry()
+            registry.credocument = registry.credocument or {}
+            registry.credocument.__index = registry.credocument
+            registry.credocument.getStringProperty = function() end
+            registry.credocument.close = not data:find("nomethod", 1, true) and function() end or nil
+            if path == standard and standard_highlight then
+                registry.crehighlight = { get = function() end }
+            end
+            return { engine = data, newDocView = function() end,
+                     getVersion = not data:find("lacking", 1, true) and function() end or nil }
+        end
     end
-    stub("document/credocument", CreDocument)
-    local function restart()
-        Engine.guard_active = nil
-        Engine.installGuard()
+    local function standardLoader(name)
+        if name == "libs/libkoreader-cre" then
+            return function() return { engine = "standard" } end
+        end
+    end
+    table.insert(package.loaders, standardLoader)
+    -- A KOReader start: the early patch runs, then something loads the engine.
+    local function start()
+        package.loaded["libs/libkoreader-cre"] = nil
+        package.preload["libs/libkoreader-cre"] = nil
+        if read(patch) then dofile(patch) end
+        return require("libs/libkoreader-cre").engine
     end
 
     G_reader_settings = settings{ start_with = "last" }
     G_reader_settings.flush = function() end
+    Engine.setUp(plugin_path)
 
     -- Damaged downloads are refused.
     local b, data = build("good")
-    assert(not Engine.install(b, data .. "x", true))
-    assert(not Engine.install(b, "\127ELF other", true))
-    assert(read(lib) == "\127ELF standard")
+    assert(not Engine.install(b, data .. "x", plugin_path))
+    assert(not Engine.install(b, "\127ELF other", plugin_path))
+    assert(not read(lib) and not read(patch))
 
-    -- An engine that fails to load is replaced by the standard one at once.
-    b, data = build("bad")
-    assert(Engine.install(b, data, true))
-    assert(read(lib) == data and read(lib .. ".stock") == "\127ELF standard")
-    assert(G_reader_settings.store.start_with == "filemanager")
-    restart()
-    assert(CreDocument.engineInit() == "cre")
-    assert(read(lib) == "\127ELF standard")
-    local state = Engine.getState()
-    assert(state.pending == nil and state.bad["bad/nil@v2026.07.2-299-g8012773_2026-10-30"])
-    assert(G_reader_settings.store.start_with == "last")
-    local rolled_back = Engine.takeRollback()
-    assert(rolled_back.commit == "bad" and rolled_back.reason:find("undefined symbol", 1, true))
-    assert(Engine.takeRollback() == nil)
-
-    -- A working engine is kept once a book opens with it.
-    b, data = build("good")
-    assert(Engine.install(b, data, true))
-    Engine.verify("good") -- not before a restart
-    assert(Engine.getState().pending)
-    restart()
-    assert(CreDocument.engineInit() == "cre")
+    -- Installing puts the engine and the patch in place, and nothing else.
+    assert(Engine.install(b, data, plugin_path))
+    assert(read(lib) == data and read(standard) == "\127ELF standard")
+    assert(read(patch) == Engine.patchSource(plugin_path))
+    local state = Loader.readState()
+    assert(state.enabled and state.pending and state.commit == "good" and state.rev == koreader_rev)
+    assert(Engine.hasStock() and G_reader_settings.store.start_with == "last")
+    -- The next start loads it; a book opening with it settles it.
+    assert(start() == data)
+    assert(Loader.readState().attempts == 1)
+    Engine.verify("other") -- not this build
+    assert(Loader.readState().pending)
     Engine.verify("good")
-    state = Engine.getState()
-    assert(state.pending == nil and read(lib) == data)
-    assert(G_reader_settings.store.start_with == "last")
-    assert(Engine.hasStock())
+    state = Loader.readState()
+    assert(state.pending == nil and state.enabled)
+    -- It stays, with no more counting.
+    for _i = 1, 3 do assert(start() == data) end
+    assert(Loader.readState().attempts == nil)
 
-    -- A newer build over it keeps the standard copy; KOReader stopping twice
-    -- before a book opened with it puts the standard engine back.
-    b, data = build("crashy")
-    assert(Engine.install(b, data, false))
-    assert(read(lib .. ".stock") == "\127ELF standard")
-    for _i = 1, 2 do
-        restart()
-        assert(CreDocument.engineInit() == "cre")
-        assert(read(lib) == data)
-    end
-    restart()
-    assert(CreDocument.engineInit() == "cre")
-    assert(read(lib) == "\127ELF standard")
-    assert(Engine.getState().bad["crashy/nil@v2026.07.2-299-g8012773_2026-10-30"])
-
-    -- After a KOReader update (which replaced the library) the guard stands down.
-    b, data = build("other")
-    assert(Engine.install(b, data, true))
-    state = Engine.getState()
-    state.pending.rev = "v2026.06.1"
-    Engine.saveState(state)
-    restart()
-    assert(Engine.getState().pending == nil and not Engine.guard_active)
-    assert(G_reader_settings.store.start_with == "last")
-    -- The standard copy is from another version now.
-    state = Engine.getState()
-    state.stock_rev = "v2026.06.1"
-    Engine.saveState(state)
+    -- An engine that fails to load: KOReader's own, at once and from then on.
+    b, data = build("bad")
+    assert(Engine.install(b, data, plugin_path))
+    assert(start() == "standard")
+    state = Loader.readState()
+    assert(not state.enabled and state.failed:find("FT_Bad", 1, true))
+    local rolled_back = Engine.takeRollback()
+    assert(rolled_back.commit == "bad" and rolled_back.reason:find("FT_Bad", 1, true))
+    assert(Engine.getState().bad["bad/lib-bad.so@" .. koreader_rev])
+    assert(Engine.takeRollback() == nil)
+    assert(start() == "standard")
     assert(not Engine.hasStock())
-    assert(not Engine.restoreStock())
 
-    -- Compatibility: the new library must load and provide every function
-    -- of the running engine (module functions and document methods).
-    local probe = Engine.probeLibrary
-    local registry = debug.getregistry()
-    registry.credocument = { getStringProperty = function() end, __index = true }
-    package.loaded["libs/libkoreader-cre"] = { newDocView = function() end, getVersion = function() end }
-    local api = Engine.creApi(package.loaded["libs/libkoreader-cre"], registry)
-    assert(api["cre.newDocView"] and api["credocument:getStringProperty"] and not api["credocument:__index"])
-    Engine.probeLibrary = function() return { ["cre.newDocView"] = true, ["credocument:getStringProperty"] = true } end
-    local ok, err = Engine.checkCompatible("\127ELF x")
-    assert(not ok and err:find("cre.getVersion", 1, true), err)
-    Engine.probeLibrary = function() return nil, "undefined symbol: FT_Foo" end
-    ok, err = Engine.checkCompatible("\127ELF x")
-    assert(not ok and err:find("FT_Foo", 1, true), err)
-    Engine.probeLibrary = function()
-        return { ["cre.newDocView"] = true, ["cre.getVersion"] = true, ["credocument:getStringProperty"] = true, ["cre.extra"] = true }
+    -- KOReader stopping twice before a book opened with it: KOReader's own.
+    b, data = build("crashy")
+    assert(Engine.install(b, data, plugin_path))
+    assert(start() == data and start() == data)
+    assert(start() == "standard")
+    assert(Engine.takeRollback().reason:find("stopped", 1, true))
+
+    -- After a KOReader update, it's checked again at start-up and, as it
+    -- still fits, kept: proven again once a book opens with it.
+    b, data = build("good")
+    assert(Engine.install(b, data, plugin_path))
+    assert(start() == data)
+    Engine.verify("good")
+    local old_rev = koreader_rev
+    koreader_rev = "v2026.08.1-12-gabcdef1_2026-11-20"
+    assert(start() == data)
+    state = Loader.readState()
+    assert(state.rev == koreader_rev and state.previous_rev == old_rev)
+    assert(state.pending and state.attempts == 1)
+    Engine.verify("good")
+    assert(not Loader.readState().pending)
+    assert(start() == data) -- no more checking for this version
+
+    -- One that lacks a function KOReader's own engine has: KOReader's own,
+    -- and it isn't offered again for this version.
+    b, data = build("lacking")
+    assert(Engine.install(b, data, plugin_path))
+    assert(start() == data)
+    Engine.verify("lacking")
+    koreader_rev = "v2026.09.1-30-g1234567_2026-12-20"
+    assert(start() == "standard")
+    rolled_back = Engine.takeRollback()
+    assert(rolled_back.reason:find("cre.getVersion", 1, true), rolled_back.reason)
+    assert(Engine.getState().bad["lacking/lib-lacking.so@" .. koreader_rev])
+    assert(start() == "standard")
+
+    -- When KOReader's own engine can't be checked: KOReader's own for now,
+    -- without turning it off or trying again for this version; the plugin's
+    -- check can put it back (with the library already here).
+    b, data = build("good")
+    assert(Engine.install(b, data, plugin_path))
+    assert(start() == data)
+    Engine.verify("good")
+    koreader_rev = "v2026.10.1-5-g7654321_2027-01-20"
+    standard_broken = true
+    assert(start() == "standard")
+    state = Loader.readState()
+    assert(state.enabled and state.unchecked_rev == koreader_rev and not state.failed)
+    standard_broken = false
+    assert(start() == "standard")
+    assert(Engine.existingLibrary(b) == data)
+    assert(Engine.existingLibrary(build("other")) == nil)
+    assert(Engine.install(b, Engine.existingLibrary(b), plugin_path))
+    assert(Loader.readState().unchecked_rev == nil)
+    assert(start() == data)
+
+    -- Restoring KOReader's engine removes ours.
+    assert(Engine.restoreStock())
+    assert(not read(lib) and not read(patch) and not Engine.hasStock())
+    assert(start() == "standard")
+
+    -- Too late to redirect once the engine is loaded.
+    b, data = build("good")
+    assert(Engine.install(b, data, plugin_path))
+    package.preload["libs/libkoreader-cre"] = nil
+    package.loaded["libs/libkoreader-cre"] = { engine = "standard" }
+    assert(not Loader.apply())
+
+    -- The plugin keeps the patch current.
+    write(patch, "-- old")
+    Engine.setUp(plugin_path)
+    assert(read(patch) == Engine.patchSource(plugin_path))
+    os.remove(patch)
+    Engine.setUp(plugin_path)
+    assert(read(patch))
+
+    -- Moving an engine installed over KOReader's (earlier versions)…
+    assert(Engine.restoreStock())
+    write(standard, "\127ELF old")
+    write(standard .. ".stock", "\127ELF standard")
+    G_reader_settings = settings{ start_with = "filemanager",
+        knuthplass_engine = { stock_rev = koreader_rev,
+            pending = { commit = "old", id = "old/lib-old.so", start_with = { value = "last" } } } }
+    G_reader_settings.flush = function() end
+    Engine.migrate(plugin_path)
+    assert(read(standard) == "\127ELF standard" and not read(standard .. ".stock"))
+    assert(read(lib) == "\127ELF old" and read(patch))
+    state = Loader.readState()
+    assert(state.enabled and state.commit == "old" and state.pending and state.rev == koreader_rev)
+    assert(G_reader_settings.store.start_with == "last")
+    assert(G_reader_settings.store.knuthplass_engine.stock_rev == nil)
+    assert(start() == "\127ELF old")
+    -- …or after a KOReader update replaced it: just tidy up.
+    write(standard .. ".stock", "\127ELF older")
+    G_reader_settings.store.knuthplass_engine = { stock_rev = "v2026.06.1" }
+    Engine.migrate(plugin_path)
+    assert(read(standard) == "\127ELF standard" and not read(standard .. ".stock"))
+    assert(G_reader_settings.store.knuthplass_engine.stock_rev == nil)
+
+    -- The comparison covers every table the engine registers: a missing
+    -- document method, or a metatable only KOReader's own engine has.
+    assert(Engine.restoreStock())
+    local function updateWith(name)
+        b, data = build(name)
+        assert(Engine.install(b, data, plugin_path))
+        assert(start() == data)
+        Engine.verify(name)
+        koreader_rev = koreader_rev .. "+"
+        return start()
     end
-    assert(Engine.checkCompatible("\127ELF x"))
-    assert(not read(lib .. ".probe")) -- cleaned up
-    Engine.probeLibrary = probe
-    registry.credocument = nil
+    assert(updateWith("nomethod") == "standard")
+    assert(Engine.takeRollback().reason:find("credocument:close", 1, true))
+    standard_highlight = true
+    assert(updateWith("good") == "standard")
+    assert(Engine.takeRollback().reason:find("crehighlight:get", 1, true))
+    standard_highlight = false
+    assert(updateWith("good") == data) -- (and the same build passes otherwise)
+
+    -- KOReader always gets an engine: an engine raising an error as it
+    -- loads, or KOReader's loaders not finding its own, fall back to libs/.
+    b, data = build("explode")
+    assert(Engine.install(b, data, plugin_path))
+    assert(start() == "standard")
+    assert(Engine.takeRollback().reason:find("boom", 1, true))
+    b, data = build("bad")
+    assert(Engine.install(b, data, plugin_path))
+    for i, loader in ipairs(package.loaders) do
+        if loader == standardLoader then table.remove(package.loaders, i) break end
+    end
+    assert(start() == "\127ELF standard") -- straight from libs/
+    table.insert(package.loaders, standardLoader)
+    assert(Engine.takeRollback())
+
+    -- KOReader's child-process helpers changing doesn't stop KOReader: its
+    -- own engine, checked again later, nothing turned off.
+    b, data = build("good")
+    assert(Engine.install(b, data, plugin_path))
+    assert(start() == data)
+    Engine.verify("good")
+    local ffiutil = package.loaded["ffi/util"]
+    local runInSubProcess = ffiutil.runInSubProcess
+    ffiutil.runInSubProcess = nil
+    koreader_rev = koreader_rev .. "+"
+    assert(start() == "standard")
+    state = Loader.readState()
+    assert(state.enabled and state.unchecked_rev == koreader_rev and not state.failed)
+    ffiutil.runInSubProcess = runInSubProcess
+
+    -- The plugin's check before installing is the same comparison.
+    assert(Engine.checkCompatible("\127ELF good"))
+    local ok, err = Engine.checkCompatible("\127ELF lacking")
+    assert(not ok and err:find("cre.getVersion", 1, true), err)
+    ok, err = Engine.checkCompatible("\127ELF bad")
+    assert(not ok and err:find("FT_Bad", 1, true), err)
+    standard_broken = true
+    ok, err = Engine.checkCompatible("\127ELF good")
+    assert(not ok and err:find("couldn't be checked", 1, true), err)
+    standard_broken = false
+    assert(not read(dir .. "/knuthplass/probe.so")) -- cleaned up
+    debug.getregistry().credocument = nil
+    debug.getregistry().crehighlight = nil
+
+    package.loadlib = real_loadlib
+    for i, loader in ipairs(package.loaders) do
+        if loader == standardLoader then table.remove(package.loaders, i) break end
+    end
     package.loaded["libs/libkoreader-cre"] = nil
+    package.preload["libs/libkoreader-cre"] = nil
+    koreader_rev = "v2026.07.2-299-g8012773_2026-10-30"
+
+    -- An engine's functions: its module's, and what it changed in the
+    -- registry (here, over a table another engine registered).
+    local Loader = require("knuthplass_loader")
+    local registry = { credocument = { close = function() end, keep = print, __index = true }, _LOADED = {} }
+    local snapshot = Loader.registrySnapshot(registry)
+    registry.credocument.close = function() end -- the new engine's
+    registry.creimage = { scale = function() end }
+    registry._LOADED.cre = { x = function() end }
+    local api = Loader.creApi({ newDocView = function() end, version = 3 }, registry, snapshot)
+    assert(api["cre.newDocView"] and api["credocument:close"] and api["creimage:scale"])
+    assert(not api["cre.version"] and not api["credocument:keep"] and not api["credocument:__index"])
+    assert(not api["_LOADED:cre"])
 
     os.execute("rm -rf '" .. dir .. "'")
 end

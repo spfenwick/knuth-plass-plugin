@@ -1,6 +1,6 @@
 --[[--
-Installs the Knuth–Plass CREngine (libs/libkoreader-cre.so) built by the
-plugin repository's "Build engine" workflow.
+Installs the Knuth–Plass CREngine built by the plugin repository's "Build
+engine" workflow.
 
 The library only has to agree with the rest of KOReader where they meet
 (cre.cpp's Lua API and the shared libraries it links), so the manifest lists
@@ -12,18 +12,16 @@ installing, the library is loaded in a child process (which fails if a
 library or symbol it needs is missing), and must provide every function of
 the running engine (which KOReader's Lua code may call).
 
-Installing keeps the standard engine as libkoreader-cre.so.stock and swaps
-the new one in by renaming. Until a book has opened with the new engine,
-a guard (installed by main.lua as KOReader starts) counts engine starts:
-if the engine fails to load, or KOReader stops twice before a book opened
-with it, the standard engine is put back. For the guard to run before the
-engine loads, KOReader starts in the file browser (not the last book)
-until then.
+KOReader's own libs/libkoreader-cre.so is never changed: the engine is kept
+in <data folder>/knuthplass/, and an early user patch (knuthplass_loader.lua)
+makes KOReader load it from there, for the KOReader version it was installed
+for, and goes back to KOReader's own engine if it fails.
 ]]
 
 local logger = require("logger")
 local _ = require("gettext")
 local T = require("ffi/util").template
+local Loader = require("knuthplass_loader")
 
 local Engine = {
     manifest_url = "https://github.com/spfenwick/knuth-plass-plugin/releases/download/engine/manifest.json",
@@ -34,21 +32,20 @@ local Engine = {
     capability_property = "crengine.style.justify.tolerance",
     max_manifest_size = 256 * 1024,
     max_lib_size = 16 * 1024 * 1024,
-    -- Engine starts allowed before a book has opened with a new engine.
-    max_attempts = 2,
+    -- The early user patch: a copy of knuthplass_loader.lua.
+    patch_name = "1-knuthplass-engine.lua",
 }
 
 -- State ---------------------------------------------------------------------
 --
--- G_reader_settings[settings_key]:
---   pending     = { commit, id, rev, attempts, start_with = { value } }
---                 an installed engine not yet seen working
---   stock_rev   = the KOReader version libkoreader-cre.so.stock is from
+-- The installed engine's state is in knuthplass/engine.lua (see
+-- knuthplass_loader.lua), as the early patch reads it before
+-- G_reader_settings is open. G_reader_settings[settings_key] has:
 --   bad         = { [build id @ revision] = true }: builds that failed with
 --                 this KOReader version, not offered again
---   rolled_back = { commit, reason }: to tell the user once
 --   skip        = a build the user chose to skip
 --   base_cache  = { rev, base }: this KOReader's koreader-base commit
+-- (and, from before the engine had its own folder: pending, stock_rev.)
 
 function Engine.getState()
     return G_reader_settings:readSetting(Engine.settings_key) or {}
@@ -65,8 +62,7 @@ end
 -- Device and version ----------------------------------------------------------
 
 function Engine.revision()
-    local ok, Version = pcall(require, "version")
-    return ok and Version:getCurrentRevision() or nil
+    return Loader.revision()
 end
 
 --- The git ref of this KOReader's koreader repository commit: the commit in
@@ -87,7 +83,8 @@ function Engine.target()
     return ok_model and model or nil
 end
 
-function Engine.libPath()
+--- KOReader's own engine (which the plugin no longer changes).
+function Engine.standardLibPath()
     local lfs = require("libs/libkoreader-lfs")
     return lfs.currentdir() .. "/libs/libkoreader-cre.so"
 end
@@ -253,121 +250,173 @@ local function replaceFile(path, data)
     return true
 end
 
--- Start-up guard -------------------------------------------------------------
+-- The early patch ------------------------------------------------------------
 
--- Start in the file browser while a new engine is unproven, so plugins (and
--- the guard) load before the engine does.
-local function forceFileBrowserStart(pending)
-    local start_with = G_reader_settings:readSetting("start_with")
-    if start_with == "last" then
-        pending.start_with = { value = start_with }
-        G_reader_settings:saveSetting("start_with", "filemanager")
-    end
+local function patchPath()
+    local DataStorage = require("datastorage")
+    return DataStorage:getPatchesDir() .. "/" .. Engine.patch_name
 end
 
-local function restoreStartWith(pending)
-    if pending and pending.start_with then
-        -- Unless the user has chosen something else in the meantime.
-        if G_reader_settings:readSetting("start_with") == "filemanager" then
-            G_reader_settings:saveSetting("start_with", pending.start_with.value)
-        end
-    end
+--- The patch's contents: knuthplass_loader.lua, run.
+function Engine.patchSource(plugin_path)
+    local loader = readFile(plugin_path .. "/knuthplass_loader.lua")
+    if not loader then return nil end
+    return table.concat({
+        "-- Knuth–Plass justification plugin: loads its CREngine build",
+        "-- (koreader/knuthplass/) instead of KOReader's own, which it leaves",
+        "-- as it is. Written by the plugin; delete the plugin's engine with its",
+        "-- \"Restore standard engine\" rather than this file.",
+        "local Loader = (function()",
+        loader,
+        "end)()",
+        "package.loaded[\"knuthplass_loader.patch\"] = Loader",
+        "Loader.apply()",
+        "",
+    }, "\n")
 end
 
---- Put the standard engine back.
+--- Write the patch if it's missing or out of date.
 -- @return true, or nil and an error message
-function Engine.restoreStock(reason)
+function Engine.installPatch(plugin_path)
+    local source = Engine.patchSource(plugin_path)
+    if not source then return nil, "knuthplass_loader.lua is missing" end
+    local path = patchPath()
+    if readFile(path) == source then return true end
+    require("util").makePath(path:match("^(.*)/[^/]+$"))
+    return replaceFile(path, source)
+end
+
+function Engine.removePatch()
+    os.remove(patchPath())
+end
+
+--- Whether KOReader runs user patches (they can be turned off).
+function Engine.patchesEnabled()
+    local ok, userpatch = pcall(require, "userpatch")
+    return ok and not (userpatch.arePatchesDisabled and userpatch.arePatchesDisabled())
+end
+
+--- Called as KOReader loads the plugin: keep the patch current and, if it
+-- didn't run (patches off), set up the redirect now, which is in time when
+-- KOReader starts in the file browser.
+function Engine.setUp(plugin_path)
+    Engine.plugin_path = plugin_path
+    local state = Loader.readState()
+    if state and state.enabled then
+        local ok, err = Engine.installPatch(plugin_path)
+        if not ok then logger.warn("KnuthPlass: cannot write the engine patch:", err) end
+    end
+    Loader.apply()
+end
+
+-- From before the engine had its own folder ------------------------------------
+
+--- Earlier versions replaced libs/libkoreader-cre.so (keeping KOReader's
+-- own as libkoreader-cre.so.stock). Put KOReader's own back, and keep using
+-- the Knuth–Plass engine from the plugin's folder.
+function Engine.migrate(plugin_path)
     local state = Engine.getState()
-    local lib = Engine.libPath()
-    local stock = readFile(lib .. ".stock")
-    if not stock then
-        return nil, _("there is no copy of the standard engine")
+    if not state.stock_rev and not state.pending then return end
+    local lib = Engine.standardLibPath()
+    local stock = lib .. ".stock"
+    local rev = Engine.revision()
+    if state.pending and state.pending.start_with
+            and G_reader_settings:readSetting("start_with") == "filemanager" then
+        G_reader_settings:saveSetting("start_with", state.pending.start_with.value)
     end
-    if state.stock_rev ~= Engine.revision() then
-        return nil, _("the copy of the standard engine is from another KOReader version")
-    end
-    local ok, err = replaceFile(lib, stock)
-    if not ok then return nil, err end
-    if state.pending then
-        restoreStartWith(state.pending)
-        if reason then
-            state.bad = state.bad or {}
-            state.bad[badKey(state.pending.id or state.pending.commit)] = true
-            state.rolled_back = { commit = state.pending.commit, reason = reason }
+    if state.stock_rev == rev and readFile(stock) then
+        -- libs/libkoreader-cre.so is the Knuth–Plass engine.
+        local knuth = readFile(lib)
+        require("util").makePath(Loader.dir())
+        if knuth and replaceFile(Loader.libPath(), knuth) then
+            Loader.writeState({
+                enabled = true,
+                lib = Loader.libPath(),
+                commit = state.pending and state.pending.commit or nil,
+                id = state.pending and state.pending.id or nil,
+                rev = rev,
+                -- It was in use already, unless it was still being tried.
+                pending = state.pending and true or nil,
+                attempts = 0,
+            })
+            Engine.installPatch(plugin_path)
         end
-        state.pending = nil
+        local ok, err = replaceFile(lib, readFile(stock))
+        if not ok then
+            logger.warn("KnuthPlass: cannot restore KOReader's engine:", err)
+            return
+        end
     end
+    -- (After a KOReader update, libs/ has KOReader's engine already.)
+    os.remove(stock)
+    state.stock_rev = nil
+    state.pending = nil
     Engine.saveState(state)
-    logger.info("KnuthPlass: restored the standard engine:", reason)
+    logger.info("KnuthPlass: moved the engine to", Loader.dir())
+end
+
+-- Installed engine ------------------------------------------------------------
+
+--- The installed engine (Loader's state), if it's in use.
+function Engine.installed()
+    local state = Loader.readState()
+    if state and state.enabled then return state end
+    return nil
+end
+
+--- Go back to KOReader's own engine (from the next start).
+-- @return true, or nil and an error message
+function Engine.restoreStock()
+    local state = Loader.readState() or {}
+    state.enabled = false
+    state.pending = nil
+    local ok, err = Loader.writeState(state)
+    if not ok then return nil, err end
+    os.remove(Loader.libPath())
+    Engine.removePatch()
+    logger.info("KnuthPlass: back to KOReader's engine")
     return true
 end
 
+--- Whether there's a Knuth–Plass engine to switch off.
 function Engine.hasStock()
-    local file = io.open(Engine.libPath() .. ".stock", "rb")
-    if file then file:close() end
-    return file ~= nil and Engine.getState().stock_rev == Engine.revision()
+    return Engine.installed() ~= nil
 end
 
---- Called once as KOReader loads the plugin. While a new engine is
--- unproven, counts engine starts and puts the standard engine back when
--- the new one fails.
-function Engine.installGuard()
-    local state = Engine.getState()
-    local pending = state.pending
-    if not pending then return end
-    if pending.rev ~= Engine.revision() then
-        -- KOReader was updated, which replaced the library.
-        restoreStartWith(pending)
-        state.pending = nil
-        Engine.saveState(state)
-        return
-    end
-    Engine.guard_active = true
-    local CreDocument = require("document/credocument")
-    local engineInit = CreDocument.engineInit
-    CreDocument.engineInit = function(...)
-        CreDocument.engineInit = engineInit
-        state = Engine.getState()
-        if not state.pending then
-            return engineInit(...)
-        end
-        state.pending.attempts = (state.pending.attempts or 0) + 1
-        Engine.saveState(state)
-        if state.pending.attempts > Engine.max_attempts then
-            Engine.restoreStock(_("KOReader stopped before a book opened with it"))
-        end
-        local ok, cre = pcall(engineInit, ...)
-        if ok then return cre end
-        logger.warn("KnuthPlass: the new engine failed to load:", cre)
-        if Engine.restoreStock(T(_("it failed to load: %1"), tostring(cre))) then
-            return engineInit(...)
-        end
-        error(cre)
-    end
+--- Whether this session runs the plugin's engine (loaded by the early
+-- patch's copy of the loader, or the plugin's).
+function Engine.redirected()
+    local patch = package.loaded["knuthplass_loader.patch"]
+    return (type(patch) == "table" and patch.active) or Loader.active or false
 end
 
---- Called when a book has opened: a pending engine that reports its build
--- has proved itself.
+--- Called when a book has opened: a pending engine that is running (and
+-- reports its build, if it's known) has proved itself.
 function Engine.verify(build)
-    if not Engine.guard_active then return end
-    local state = Engine.getState()
-    if state.pending and build == state.pending.commit then
+    local state = Loader.readState()
+    if state and state.enabled and state.pending and Engine.redirected()
+            and (state.commit == nil or build == state.commit)
+            and state.rev == Engine.revision() then
         logger.info("KnuthPlass: engine", build, "works")
-        restoreStartWith(state.pending)
         state.pending = nil
-        Engine.saveState(state)
+        state.attempts = nil
+        Loader.writeState(state)
     end
-    Engine.guard_active = false
 end
 
---- A rollback to tell the user about (once).
+--- A failed engine to tell the user about (once): { commit, reason }.
 function Engine.takeRollback()
-    local state = Engine.getState()
-    local rolled_back = state.rolled_back
-    if rolled_back then
-        state.rolled_back = nil
-        Engine.saveState(state)
+    local state = Loader.readState()
+    if not state or not state.failed then return nil end
+    local rolled_back = { commit = state.commit or "?", reason = state.failed }
+    if state.id then
+        local settings = Engine.getState()
+        settings.bad = settings.bad or {}
+        settings.bad[badKey(state.id)] = true
+        Engine.saveState(settings)
     end
+    state.failed = nil
+    Loader.writeState(state)
     return rolled_back
 end
 
@@ -386,144 +435,69 @@ function Engine.verifyDownload(build, data)
     return true
 end
 
---- Install build (data is the downloaded library) over the running engine.
--- running_is_standard: the running engine is KOReader's own, so it is kept
--- as libkoreader-cre.so.stock (otherwise an existing copy is kept).
+--- The installed library, if it's this build (to use it again, say after
+-- a KOReader update, without downloading it).
+function Engine.existingLibrary(build)
+    local data = readFile(Loader.libPath())
+    if data and Engine.verifyDownload(build, data) then
+        return data
+    end
+    return nil
+end
+
+--- Install build (data is the library) in the plugin's folder, for this
+-- KOReader version, from the next start.
 -- @return true, or nil and an error message
-function Engine.install(build, data, running_is_standard)
+function Engine.install(build, data, plugin_path)
     local ok, err = Engine.verifyDownload(build, data)
     if not ok then return nil, err end
-    local lib = Engine.libPath()
-    local state = Engine.getState()
-    local rev = Engine.revision()
-    if running_is_standard then
-        local current = readFile(lib)
-        if not current then
-            return nil, _("cannot read the current engine")
-        end
-        local ok, err = writeFile(lib .. ".stock", current)
+    require("util").makePath(Loader.dir())
+    if readFile(Loader.libPath()) ~= data then
+        ok, err = replaceFile(Loader.libPath(), data)
         if not ok then return nil, err end
-        state.stock_rev = rev
     end
-    ok, err = replaceFile(lib, data)
+    ok, err = Loader.writeState({
+        enabled = true,
+        lib = Loader.libPath(),
+        commit = build.commit,
+        id = Engine.buildId(build),
+        rev = Engine.revision(),
+        pending = true,
+        attempts = 0,
+    })
     if not ok then return nil, err end
-    local pending = { commit = build.commit, id = Engine.buildId(build), rev = rev, attempts = 0 }
-    forceFileBrowserStart(pending)
-    state.pending = pending
-    Engine.saveState(state)
-    -- This session still runs the old engine: only a restart can prove it.
-    Engine.guard_active = false
+    if plugin_path then
+        ok, err = Engine.installPatch(plugin_path)
+        if not ok then return nil, err end
+    end
     logger.info("KnuthPlass: installed engine", build.commit)
     return true
 end
 
 -- Compatibility ---------------------------------------------------------------
-
--- The metatables cre.cpp registers: its methods on documents and images.
-local CRE_METATABLES = { "credocument", "creimage" }
-
---- The functions a cre module provides (KOReader's Lua code calls them):
--- { ["cre.name"] = true, ["credocument:name"] = true, … }
-function Engine.creApi(module, registry)
-    local api = {}
-    if type(module) == "table" then
-        for name, value in pairs(module) do
-            if type(value) == "function" then api["cre." .. name] = true end
-        end
-    end
-    for _i, mt_name in ipairs(CRE_METATABLES) do
-        local mt = registry[mt_name]
-        if type(mt) == "table" then
-            for name, value in pairs(mt) do
-                if type(value) == "function" then api[mt_name .. ":" .. name] = true end
-            end
-        end
-    end
-    return api
-end
+-- (The loading test is in knuthplass_loader.lua, which the early patch also
+-- uses to check the engine again after a KOReader update.)
 
 --- Load the library at path in a child process.
--- @return its API (see creApi), or nil and an error message
+-- @return its API (see Loader.creApi), or nil and an error message
 function Engine.probeLibrary(path)
-    local ffiutil = require("ffi/util")
-    local pid, read_fd = ffiutil.runInSubProcess(function(_pid, write_fd)
-        -- The running engine's tables would hide what the new one lacks.
-        local registry = debug.getregistry()
-        for _i, mt_name in ipairs(CRE_METATABLES) do registry[mt_name] = nil end
-        package.loaded.cre = nil
-        rawset(_G, "cre", nil)
-        -- Resolves every symbol now: fails if one is missing.
-        local open, err = package.loadlib(path, "luaopen_cre")
-        local out
-        if not open then
-            out = "ERR " .. tostring(err)
-        else
-            local ok, module = pcall(open)
-            if not ok then
-                out = "ERR " .. tostring(module)
-            else
-                if type(module) ~= "table" then module = package.loaded.cre end
-                local names = {}
-                for name in pairs(Engine.creApi(module, registry)) do table.insert(names, name) end
-                out = "OK\n" .. table.concat(names, "\n")
-            end
-        end
-        ffiutil.writeToFD(write_fd, out, true)
-    end, true)
-    if not pid then
-        return nil, tostring(read_fd)
-    end
-    -- Give it 20 seconds.
-    local done = false
-    for _i = 1, 200 do
-        if ffiutil.isSubProcessDone(pid) then
-            done = true
-            break
-        end
-        ffiutil.usleep(100000)
-    end
-    if not done then
-        ffiutil.terminateSubProcess(pid)
-        ffiutil.isSubProcessDone(pid, true)
-        ffiutil.readAllFromFD(read_fd)
-        return nil, _("loading it took too long")
-    end
-    local out = ffiutil.readAllFromFD(read_fd)
-    if out:sub(1, 3) == "OK\n" then
-        local api = {}
-        for name in out:sub(4):gmatch("[^\n]+") do api[name] = true end
-        return api
-    elseif out:sub(1, 4) == "ERR " then
-        return nil, out:sub(5)
-    end
-    return nil, _("it crashed when loaded")
+    return Loader.probe(path)
 end
 
 --- Check that the library (data) works with this KOReader: it loads, and
--- provides every function the running engine does.
+-- has every function KOReader's own engine has (the same check the early
+-- patch makes after a KOReader update).
 -- @return true, or nil and an error message
 function Engine.checkCompatible(data)
-    -- Next to the engine, so it finds the same libraries.
-    local probe = Engine.libPath() .. ".probe"
+    -- Where it would be installed. (Its libraries are found through
+    -- luajit's rpath, $ORIGIN/libs.)
+    require("util").makePath(Loader.dir())
+    local probe = Loader.dir() .. "/probe.so"
     local ok, err = writeFile(probe, data)
     if not ok then return nil, err end
-    local api
-    api, err = Engine.probeLibrary(probe)
+    ok, err = Loader.check(probe, Engine.probeLibrary)
     os.remove(probe)
-    if not api then
-        return nil, T(_("it doesn't load with this KOReader (%1)"), tostring(err))
-    end
-    local running = package.loaded["libs/libkoreader-cre"]
-    if running then
-        local missing = {}
-        for name in pairs(Engine.creApi(running, debug.getregistry())) do
-            if not api[name] then table.insert(missing, name) end
-        end
-        if #missing > 0 then
-            table.sort(missing)
-            return nil, T(_("it lacks functions this KOReader uses (%1)"), table.concat(missing, ", "))
-        end
-    end
+    if not ok then return nil, err end
     return true
 end
 
@@ -550,8 +524,13 @@ end
 
 function Engine.downloadAndInstall(build, current_build, supported, fetch, quiet)
     local UIManager = require("ui/uimanager")
-    local progress = not quiet and showInfo(T(_("Downloading the Knuth–Plass engine %1…"), build.commit))
-    local data, err = fetch(build.url, Engine.max_lib_size)
+    -- Already here (installed for an earlier KOReader version, say)?
+    local data, err = Engine.existingLibrary(build)
+    local progress
+    if not data then
+        progress = not quiet and showInfo(T(_("Downloading the Knuth–Plass engine %1…"), build.commit))
+        data, err = fetch(build.url, Engine.max_lib_size)
+    end
     local ok
     if data then
         ok, err = Engine.verifyDownload(build, data)
@@ -567,8 +546,7 @@ function Engine.downloadAndInstall(build, current_build, supported, fetch, quiet
         end
     end
     if ok then
-        -- An engine without the Knuth–Plass settings is KOReader's own.
-        ok, err = Engine.install(build, data, current_build == "" and not supported)
+        ok, err = Engine.install(build, data, Engine.plugin_path)
     end
     closeWidget(progress)
     if not ok then
@@ -580,8 +558,12 @@ function Engine.downloadAndInstall(build, current_build, supported, fetch, quiet
     end
     -- For the rest of this session (the file browser and the reader each
     -- have their own plugin instance).
-    Engine.installed = build.commit
-    UIManager:askForRestart(T(_("The Knuth–Plass engine %1 has been installed. It will be used after KOReader restarts.\n\nUntil a book has opened with it, KOReader starts in the file browser, and if it fails the standard engine is put back."), build.commit))
+    Engine.installed_this_session = build.commit
+    local text = T(_("The Knuth–Plass engine %1 has been installed. It will be used after KOReader restarts.\n\nKOReader's own engine is left as it is, and is used again if this one fails."), build.commit)
+    if not Engine.patchesEnabled() then
+        text = text .. "\n\n" .. _("User patches are turned off, so it's only used when KOReader starts in the file browser.")
+    end
+    UIManager:askForRestart(text)
     return true
 end
 
@@ -624,8 +606,8 @@ end
 -- Appends status lines to report (for interactive checks).
 -- @return true if it offered or installed an update
 function Engine.check(plugin, interactive, mode, fetch, report)
-    if Engine.installed then
-        table.insert(report, T(_("Engine: %1 is installed and will be used after KOReader restarts."), Engine.installed))
+    if Engine.installed_this_session then
+        table.insert(report, T(_("Engine: %1 is installed and will be used after KOReader restarts."), Engine.installed_this_session))
         return false
     end
     local document = plugin.ui and plugin.ui.document

@@ -24,11 +24,19 @@ local T = require("ffi/util").template
 local Engine = require("knuthplass_engine")
 local Updater = require("knuthplass_updater")
 
--- Runs as KOReader loads its plugins: watches a newly installed engine
--- until a book has opened with it.
+-- Runs as KOReader loads its plugins: moves an engine installed by earlier
+-- versions (over KOReader's own) to the plugin's folder, keeps the early
+-- patch that loads it current, and sets up loading it if the patch didn't.
+-- (KOReader tells the plugin its path only after loading this file.)
 do
-    local ok, err = pcall(Engine.installGuard)
-    if not ok then logger.warn("Knuth–Plass: engine guard:", err) end
+    local source = debug.getinfo(1, "S").source
+    local plugin_path = source:match("^@(.*)/[^/]+$")
+    if plugin_path then
+        local ok, err = pcall(Engine.migrate, plugin_path)
+        if not ok then logger.warn("Knuth–Plass: engine migration:", err) end
+        ok, err = pcall(Engine.setUp, plugin_path)
+        if not ok then logger.warn("Knuth–Plass: engine setup:", err) end
+    end
 end
 
 -- A Knuth-capable engine fills in a default for this property when a
@@ -380,6 +388,7 @@ function KnuthPlass:init()
     elseif not self.ui.document and self.ui.menu then
         -- The file browser: updates and the engine.
         self.ui.menu:registerToMainMenu(self)
+        UIManager:nextTick(function() self:showRollback() end)
         self:scheduleUpdateCheck()
     end
 end
@@ -510,15 +519,20 @@ function KnuthPlass:onReaderReady()
     if self.active then
         self:hookProfiles()
     end
+    self:showRollback()
+    self:scheduleUpdateCheck()
+end
+
+-- Tell the user (once) if the Knuth–Plass engine was turned off at start-up.
+function KnuthPlass:showRollback()
     local rolled_back = Engine.takeRollback()
     if rolled_back then
         local InfoMessage = require("ui/widget/infomessage")
         UIManager:show(InfoMessage:new{
-            text = T(_("The Knuth–Plass engine %1 was removed and KOReader's standard engine put back, because %2."),
+            text = T(_("The Knuth–Plass engine %1 was turned off, and KOReader's own engine used, because %2."),
                 rolled_back.commit, rolled_back.reason),
         })
     end
-    self:scheduleUpdateCheck()
 end
 
 -- Let Profiles' "create from current book settings" include our settings.
@@ -941,6 +955,18 @@ function KnuthPlass:showEngineInfo()
     local build, supported = Engine.runningEngine(self.ui.document)
     local text = T(_("Engine build: %1\nKOReader: %2\nDevice: %3\n\nThe Knuth–Plass engine is a CREngine built from the knuth-plass-history branch of github.com/spfenwick/crengine. \"Check for updates\" also looks for a build for this KOReader version."),
         Engine.buildText(build), tostring(Engine.revision()), tostring(Engine.target()))
+    local installed = Engine.installed()
+    if installed then
+        text = text .. "\n\n" .. T(_("The Knuth–Plass engine is loaded from %1 (KOReader's own engine is left as it is)."), installed.lib)
+        if installed.unchecked_rev == Engine.revision() then
+            text = text .. " " .. _("It couldn't be checked against this KOReader version, so KOReader's own engine is used; \"Check for updates\" checks it and puts it back.")
+        elseif installed.rev ~= Engine.revision() then
+            text = text .. " " .. _("It was checked against another KOReader version; it's checked against this one when KOReader next starts.")
+        end
+        if not Engine.patchesEnabled() then
+            text = text .. " " .. _("User patches are turned off, so it's only loaded when KOReader starts in the file browser.")
+        end
+    end
     if build == "" and supported then
         text = text .. "\n\n" .. _("This engine has the Knuth–Plass settings but doesn't report its build (an early build).")
     elseif build == "" then
