@@ -113,7 +113,9 @@ function Engine.baseCommit(fetch)
         return nil, T(_("unknown KOReader version: %1"), tostring(rev))
     end
     local body, err = fetch(T(Engine.base_api_url, ref), 64 * 1024)
-    if not body then return nil, err end
+    if not body then
+        return nil, T(_("looking up KOReader %1 on GitHub: %2"), ref, tostring(err))
+    end
     local ok, info = pcall(require("json").decode, body)
     if not ok or type(info) ~= "table" or type(info.sha) ~= "string" or not info.sha:match("^%x+$") then
         return nil, _("could not find this KOReader's koreader-base")
@@ -593,17 +595,20 @@ function Engine.check(plugin, interactive, mode, fetch, report)
         table.insert(report, _("Engine: no builds for this device."))
         return false
     end
-    local base, err = Engine.baseCommit(fetch)
-    local manifest
-    if base then
-        manifest, err = Engine.fetchManifest(fetch)
+    -- Without its koreader-base (a KOReader built from a commit GitHub's
+    -- koreader repository doesn't have, say), the newest build is offered:
+    -- it's checked against the running engine before it's installed.
+    local base, base_err = Engine.baseCommit(fetch)
+    if not base then
+        logger.warn("KnuthPlass: cannot find koreader-base:", base_err)
     end
+    local manifest, err = Engine.fetchManifest(fetch)
     if not manifest then
         logger.warn("KnuthPlass: engine check failed:", err)
-        table.insert(report, T(_("Engine: could not check (%1)."), tostring(err)))
+        table.insert(report, T(_("Engine: could not download the list of builds (%1)."), tostring(err)))
         return false
     end
-    local build, exact = Engine.findBuild(manifest, base, target)
+    local build, exact = Engine.findBuild(manifest, base or "", target)
     if not build then
         table.insert(report, T(_("Engine: no builds for this device (%1)."), target))
         return false
