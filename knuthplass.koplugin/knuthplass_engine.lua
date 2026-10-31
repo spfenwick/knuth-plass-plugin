@@ -587,9 +587,10 @@ function Engine.check(plugin, interactive, mode, fetch, report)
     end
     local current_build = Engine.installedBuild(plugin.ui and plugin.ui.document)
     if current_build == nil then return false end
+    -- Which devices have builds is up to the manifest.
     local target = Engine.target()
-    if target ~= "kobo" then
-        table.insert(report, T(_("Engine: no builds for this device (%1)."), tostring(target)))
+    if not target then
+        table.insert(report, _("Engine: no builds for this device."))
         return false
     end
     local base, err = Engine.baseCommit(fetch)
@@ -604,7 +605,7 @@ function Engine.check(plugin, interactive, mode, fetch, report)
     end
     local build, exact = Engine.findBuild(manifest, base, target)
     if not build then
-        table.insert(report, _("Engine: no builds yet."))
+        table.insert(report, T(_("Engine: no builds for this device (%1)."), target))
         return false
     end
     if build.commit == current_build then

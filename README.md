@@ -9,7 +9,7 @@ It needs a CREngine that has Knuth–Plass paragraph formatting (the
 `knuth-plass-history` branch of [spfenwick/crengine](https://github.com/spfenwick/crengine)).
 With a stock engine the plugin stays inactive, and the menu entry ("install
 engine…") offers to install the Knuth–Plass engine where a build is
-available (Kobo, KOReader nightly; see [Updates](#updates)).
+available (Kobo and Kindle, KOReader nightly; see [Updates](#updates)).
 
 ## Install
 
@@ -137,7 +137,10 @@ complete and its checksum matches, and it takes effect after a restart.
 
 Once the plugin is up to date, the check also looks for a Knuth–Plass
 engine build for this device and KOReader version, and installs it the same
-way (Kobo only, for now):
+way. Builds are made for KOReader's `kobo`, `kindlepw2` and `kindlehf`
+packages; tap the dialog's "Engine" row to see which one a device uses.
+(A Kindle Voyage uses `kindlepw2`; a Paperwhite 11 on firmware 5.16.3 or
+later uses `kindlehf`.)
 
 - The engine only has to agree with the rest of KOReader where they meet:
   `cre.cpp` (the functions KOReader's Lua code calls) and the libraries it
