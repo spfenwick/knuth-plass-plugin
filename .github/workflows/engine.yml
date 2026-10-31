@@ -40,6 +40,8 @@ on:
 
 permissions:
   contents: write
+  # To remove outdated build caches.
+  actions: write
 
 # Runs share the "engine" release and its manifest.
 concurrency:
@@ -107,8 +109,32 @@ jobs:
             echo "skip=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Check out koreader-base
+      # The whole koreader-base tree (sources, crengine checkout and build
+      # output) is kept between runs, per koreader-base commit: a new
+      # crengine commit then only recompiles the files it changed. A new
+      # koreader-base (or an evicted cache) starts from scratch, with
+      # ccache's help.
+      - name: Restore build tree
         if: steps.skip.outputs.skip != 'true'
+        id: tree
+        uses: actions/cache/restore@v4
+        with:
+          path: base
+          key: tree-${{ env.TARGET }}-${{ steps.v.outputs.base }}-${{ steps.v.outputs.cre }}
+          restore-keys: |
+            tree-${{ env.TARGET }}-${{ steps.v.outputs.base }}-
+
+      - name: Restore compiler cache
+        if: steps.skip.outputs.skip != 'true' && steps.tree.outputs.cache-matched-key == ''
+        uses: actions/cache/restore@v4
+        with:
+          path: ccache
+          key: ccache-${{ env.TARGET }}-${{ steps.v.outputs.base }}
+          restore-keys: |
+            ccache-${{ env.TARGET }}-
+
+      - name: Check out koreader-base
+        if: steps.skip.outputs.skip != 'true' && steps.tree.outputs.cache-matched-key == ''
         uses: actions/checkout@v4
         with:
           repository: koreader/koreader-base
@@ -116,44 +142,69 @@ jobs:
           path: base
 
       # In place of base's crengine submodule (the only one it has). A git
-      # checkout, so the engine's CMake can read the commit too.
+      # checkout, so the engine's CMake can read the commit too; in a
+      # restored tree, checking out the new commit only touches the files
+      # it changed, so only those are rebuilt.
       - name: Check out the Knuth–Plass crengine
         if: steps.skip.outputs.skip != 'true'
         run: |
           set -euo pipefail
           dir=base/thirdparty/kpvcrlib/crengine
-          rm -rf "$dir"
-          git clone --filter=blob:none --no-checkout "https://github.com/$CRENGINE_REPO" "$dir"
-          git -C "$dir" checkout --detach "${{ steps.v.outputs.cre }}"
-
-      - name: Restore build cache
-        if: steps.skip.outputs.skip != 'true'
-        uses: actions/cache@v4
-        with:
-          path: ccache
-          key: ccache-${{ env.TARGET }}-${{ steps.v.outputs.base }}-${{ steps.v.outputs.cre }}
-          restore-keys: |
-            ccache-${{ env.TARGET }}-${{ steps.v.outputs.base }}-
-            ccache-${{ env.TARGET }}-
+          if [ ! -d "$dir/.git" ]; then
+            rm -rf "$dir"
+            git clone --filter=blob:none --no-checkout "https://github.com/$CRENGINE_REPO" "$dir"
+          fi
+          git -C "$dir" fetch --no-tags origin "${{ steps.v.outputs.cre }}"
+          git -C "$dir" checkout --force --detach "${{ steps.v.outputs.cre }}"
+          git -C "$dir" log --oneline -1
 
       - name: Build
         if: steps.skip.outputs.skip != 'true'
         run: |
           set -euo pipefail
           mkdir -p ccache
-          # The image's user (ko) has the runner's uid, so it can write the
-          # checkout. A login shell puts the toolchain on PATH.
+          # Only the engine library and what it needs (crengine, its
+          # libraries and LuaJIT), not all of KOReader's. The image's user
+          # (ko) has the runner's uid, so it can write the checkout. A login
+          # shell puts the toolchain on PATH.
           docker run --rm \
             -v "$GITHUB_WORKSPACE:/home/ko/ws" -w /home/ko/ws/base \
             -e CCACHE_DIR=/home/ko/ws/ccache -e CCACHE_MAXSIZE=2G \
             -e KNUTH_PLASS_BUILD="${{ steps.v.outputs.cre_short }}" \
-            "$IMAGE" bash -lc "make TARGET=$TARGET -j$(nproc)"
+            "$IMAGE" bash -lc "make TARGET=$TARGET koreader-cre -j$(nproc)"
+
+      # Saved before packaging, so a later failure doesn't lose the build.
+      - name: Save build tree
+        if: steps.skip.outputs.skip != 'true' && steps.tree.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: base
+          key: tree-${{ env.TARGET }}-${{ steps.v.outputs.base }}-${{ steps.v.outputs.cre }}
+
+      - name: Save compiler cache
+        if: steps.skip.outputs.skip != 'true' && steps.tree.outputs.cache-matched-key == ''
+        uses: actions/cache/save@v4
+        with:
+          path: ccache
+          key: ccache-${{ env.TARGET }}-${{ steps.v.outputs.base }}
+
+      # Each crengine commit saves a new tree; keep only the newest.
+      - name: Remove older build trees
+        if: steps.skip.outputs.skip != 'true' && steps.tree.outputs.cache-hit != 'true'
+        env:
+          KEEP: tree-${{ env.TARGET }}-${{ steps.v.outputs.base }}-${{ steps.v.outputs.cre }}
+        run: |
+          gh cache list -R "$GITHUB_REPOSITORY" --key "tree-$TARGET-" --limit 100 --json key --jq '.[].key' \
+            | grep -vx "$KEEP" | while read -r key; do
+                gh cache delete -R "$GITHUB_REPOSITORY" "$key" || true
+              done
 
       - name: Package
         if: steps.skip.outputs.skip != 'true'
         id: pkg
         run: |
           set -euo pipefail
+          # Stripped, as KOReader installs it.
           lib=$(ls base/build/*/libs/libkoreader-cre.so)
           # The engine must report the commit it was built from.
           strings "$lib" | grep -qx "${{ steps.v.outputs.cre_short }}" \
