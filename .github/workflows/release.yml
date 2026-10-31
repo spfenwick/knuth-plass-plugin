@@ -1,6 +1,10 @@
-# Publishes a plugin release for the updater when a vX.Y.Z tag is pushed.
-# The tag must match the version in _meta.lua. The release becomes
-# "latest", so the updater finds its plugin.json at
+# Publishes a plugin release for the updater, either
+#
+# - when a vX.Y.Z tag is pushed (it must match the version in _meta.lua), or
+# - by hand (Actions → Release plugin → Run workflow, on main), which tags
+#   the commit with the version in _meta.lua.
+#
+# The release becomes "latest", so the updater finds its plugin.json at
 #
 #   https://github.com/<repo>/releases/latest/download/plugin.json
 #
@@ -10,33 +14,60 @@ name: Release plugin
 on:
   push:
     tags: ["v*.*.*"]
+  workflow_dispatch:
 
 permissions:
   contents: write
+
+# One release at a time.
+concurrency:
+  group: plugin-release
+  cancel-in-progress: false
 
 jobs:
   release:
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
-      TAG: ${{ github.ref_name }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Check version
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^ *version = "\([0-9]*\.[0-9]*\.[0-9]*\)",$/\1/p' knuthplass.koplugin/_meta.lua)
+          [ -n "$version" ] || { echo "::error::no version in _meta.lua"; exit 1; }
+          tag="v$version"
+          if [ "$EVENT" = "push" ]; then
+            if [ "$tag" != "$REF_NAME" ]; then
+              echo "::error::tag $REF_NAME does not match _meta.lua version $version"
+              exit 1
+            fi
+          else
+            if [ "$REF" != "refs/heads/main" ]; then
+              echo "::error::run it on main (not $REF_NAME)"
+              exit 1
+            fi
+            if gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+                || git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+              echo "::error::$tag already exists: bump version in _meta.lua first"
+              exit 1
+            fi
+          fi
+          echo "Releasing $tag"
+          {
+            echo "VERSION=$version"
+            echo "TAG=$tag"
+          } >> "$GITHUB_ENV"
 
       - name: Test
         run: |
           sudo apt-get update && sudo apt-get install --no-install-recommends -y luajit
           sh scripts/test.sh
-
-      - name: Check version
-        run: |
-          set -euo pipefail
-          version=$(sed -n 's/^ *version = "\([0-9]*\.[0-9]*\.[0-9]*\)",$/\1/p' knuthplass.koplugin/_meta.lua)
-          if [ "v$version" != "$TAG" ]; then
-            echo "::error::tag $TAG does not match _meta.lua version $version"
-            exit 1
-          fi
-          echo "VERSION=$version" >> "$GITHUB_ENV"
 
       - name: Package
         run: |
@@ -50,8 +81,9 @@ jobs:
             > out/plugin.json
           cat out/plugin.json
 
+      # For a manual run this also creates the tag, on the commit tested.
       - name: Publish
         run: |
-          gh release create "$TAG" -R "$GITHUB_REPOSITORY" --latest \
+          gh release create "$TAG" -R "$GITHUB_REPOSITORY" --latest --target "$GITHUB_SHA" \
             --title "Knuth–Plass justification $VERSION" --generate-notes \
             out/knuthplass.koplugin.zip out/plugin.json
