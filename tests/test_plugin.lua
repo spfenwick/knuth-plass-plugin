@@ -899,4 +899,27 @@ do
     assert(not registered)
 end
 
+-- Device types: KOReader's update target names; Linux packages by arch.
+do
+    local Engine = require("knuthplass_engine")
+    local saved = package.loaded.device
+    local function device(d) package.loaded.device = d end
+    local yes, no = function() return true end, function() return false end
+    device({ otaModel = function() return "kindlehf", "kotasync" end })
+    assert(Engine.target() == "kindlehf")
+    device({ otaModel = function() return "appimage-x86_64", "kotasync" end })
+    assert(Engine.target() == "linux-x86_64")
+    local arch = ({ x64 = "x86_64", arm64 = "aarch64", arm = "armhf" })[jit.arch]
+    local expect = (jit.os == "Linux" and arch) and ("linux-" .. arch) or nil
+    device({ otaModel = function() return nil end, isDesktop = yes, isEmulator = no, model = "Linux" })
+    assert(Engine.target() == expect)
+    device({ otaModel = function() return nil end, isDesktop = no, isEmulator = yes, model = "Emulator" })
+    assert(Engine.target() == expect)
+    device({ otaModel = function() return nil end, isDesktop = yes, isEmulator = no, model = "Flatpak" })
+    assert(Engine.target() == nil)
+    device({ otaModel = function() return nil end, isDesktop = no, isEmulator = no, model = "PocketBook" })
+    assert(Engine.target() == nil)
+    package.loaded.device = saved
+end
+
 print("plugin tests passed")

@@ -9,7 +9,7 @@ It needs a CREngine that has Knuth–Plass paragraph formatting (the
 `knuth-plass-history` branch of [spfenwick/crengine](https://github.com/spfenwick/crengine)).
 With a stock engine the plugin stays inactive, and the menu entry ("install
 engine…") offers to install the Knuth–Plass engine where a build is
-available (Kobo and Kindle, KOReader nightly; see [Updates](#updates)).
+available (Kobo, Kindle, reMarkable and x86-64 Linux, KOReader nightly; see [Updates](#updates)).
 
 ## Install
 
@@ -140,10 +140,11 @@ complete and its checksum matches, and it takes effect after a restart.
 Once the plugin is up to date, the check also looks for a Knuth–Plass
 engine build for this device and KOReader version, and installs it the same
 way. Builds are made for KOReader's `kobo`, `kindlepw2`, `kindlehf` and
-`remarkable` packages; "Engine information" (or the dialog's "Engine" row)
-shows which one a device uses. (A Kindle Voyage uses `kindlepw2`; a
-Paperwhite 11 on firmware 5.16.3 or later uses `kindlehf`; a reMarkable 1
-or 2 uses `remarkable`.)
+`remarkable` packages, and `linux-x86_64` (KOReader's x86-64 Linux build,
+which its `.deb`, tarball and AppImage all contain; not the Flatpak);
+"Engine information" (or the dialog's "Engine" row) shows which one a
+device uses. (A Kindle Voyage uses `kindlepw2`; a Paperwhite 11 on firmware
+5.16.3 or later uses `kindlehf`; a reMarkable 1 or 2 uses `remarkable`.)
 
 - The engine only has to agree with the rest of KOReader where they meet:
   `cre.cpp` (the functions KOReader's Lua code calls) and the libraries it
@@ -155,11 +156,13 @@ or 2 uses `remarkable`.)
   the newest build is offered.
 - Before installing, the plugin loads the new engine in a separate process
   (which fails if a library or function it needs is missing from this
-  KOReader) and checks it has every function of the running engine. A build
+  KOReader) and checks it has every function of KOReader's own engine. A build
   that fails isn't offered again for this KOReader version.
 - KOReader's own engine (`libs/libkoreader-cre.so`) is never changed. The
   Knuth–Plass engine is kept in `knuthplass/` in KOReader's data folder
-  (`koreader/knuthplass/` on Kindle, Kobo and reMarkable), and a user patch
+  (`koreader/knuthplass/` on Kindle, Kobo and reMarkable;
+`~/.config/koreader/knuthplass/` for the Linux packages, or
+`$KO_HOME/knuthplass/` when `KO_HOME` is set), and a user patch
   the plugin installs, `patches/1-knuthplass-engine.lua`, makes KOReader
   load it from there. It runs at the very start, before anything uses the
   engine. "Restore standard engine" (Tools menu or dialog) removes both.

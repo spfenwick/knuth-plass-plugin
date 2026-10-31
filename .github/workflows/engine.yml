@@ -14,8 +14,10 @@
 #         "base": "<koreader-base commit>", "built": "<ISO time>" } } },
 #     "bases": { "<koreader-base commit>": "<fingerprint>" } }
 #
-# Targets are KOReader's names for its builds (Device:otaModel()), which are
-# also koreader-base's make targets.
+# Targets are named as the plugin finds them: KOReader's names for its
+# builds (Device:otaModel()), which are also koreader-base's make targets,
+# and linux-<arch> for KOReader's Linux build (make target "linux"), which
+# its .deb, tarball and AppImage all package.
 #
 # The library only has to agree with the rest of KOReader where they meet:
 # cre.cpp (the Lua API KOReader's frontend calls), its build options, and
@@ -67,13 +69,15 @@ env:
   CRENGINE_REPO: spfenwick/crengine
   RELEASE_TAG: engine
   GH_TOKEN: ${{ github.token }}
-  # Device types, and KOReader's build image for each.
+  # Device types (name: in the manifest; target: koreader-base's make
+  # target), and KOReader's build image for each.
   TARGETS: >-
     [
-      {"target": "kobo", "image": "koreader/kokobo:latest"},
-      {"target": "kindlepw2", "image": "koreader/kokindle:latest"},
-      {"target": "kindlehf", "image": "koreader/kokindle:latest"},
-      {"target": "remarkable", "image": "koreader/koremarkable:latest"}
+      {"name": "kobo", "target": "kobo", "image": "koreader/kokobo:latest"},
+      {"name": "kindlepw2", "target": "kindlepw2", "image": "koreader/kokindle:latest"},
+      {"name": "kindlehf", "target": "kindlehf", "image": "koreader/kokindle:latest"},
+      {"name": "remarkable", "target": "remarkable", "image": "koreader/koremarkable:latest"},
+      {"name": "linux-x86_64", "target": "linux", "image": "koreader/koappimage:5.0.0-22.04"}
     ]
 
 jobs:
@@ -157,7 +161,7 @@ jobs:
           matrix=$(jq -c --argjson targets "$TARGETS" --arg fp "$FP" --arg commit "$CRE_SHORT" \
               --arg force "$FORCE" \
             '. as $m | {include: [$targets[] | select($force == "true"
-                                                     or ($m.builds[$fp][.target].commit // "") != $commit)]}' \
+                                                     or ($m.builds[$fp][.name].commit // "") != $commit)]}' \
             old.json)
           builds=$(jq '.include | length' <<< "$matrix")
           recorded=$(jq -r --arg base "$BASE" '.bases[$base] // ""' old.json)
@@ -165,7 +169,7 @@ jobs:
           if [ "$builds" -gt 0 ] || [ "$recorded" != "$FP" ]; then
             publish=true
           fi
-          echo "To build: $(jq -r '[.include[].target] | join(", ")' <<< "$matrix"); publish: $publish"
+          echo "To build: $(jq -r '[.include[].name] | join(", ")' <<< "$matrix"); publish: $publish"
           {
             echo "matrix=$matrix"
             echo "builds=$builds"
@@ -180,6 +184,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     env:
+      NAME: ${{ matrix.name }}
       TARGET: ${{ matrix.target }}
       IMAGE: ${{ matrix.image }}
       FP: ${{ needs.plan.outputs.fp }}
@@ -198,18 +203,18 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: base
-          key: tree/${{ matrix.target }}/${{ needs.plan.outputs.base }}/${{ needs.plan.outputs.cre }}
+          key: tree/${{ matrix.name }}/${{ needs.plan.outputs.base }}/${{ needs.plan.outputs.cre }}
           restore-keys: |
-            tree/${{ matrix.target }}/${{ needs.plan.outputs.base }}/
+            tree/${{ matrix.name }}/${{ needs.plan.outputs.base }}/
 
       - name: Restore compiler cache
         if: steps.tree.outputs.cache-matched-key == ''
         uses: actions/cache/restore@v4
         with:
           path: ccache
-          key: ccache/${{ matrix.target }}/${{ needs.plan.outputs.base }}
+          key: ccache/${{ matrix.name }}/${{ needs.plan.outputs.base }}
           restore-keys: |
-            ccache/${{ matrix.target }}/
+            ccache/${{ matrix.name }}/
 
       - name: Check out koreader-base
         if: steps.tree.outputs.cache-matched-key == ''
@@ -255,22 +260,22 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: base
-          key: tree/${{ matrix.target }}/${{ needs.plan.outputs.base }}/${{ needs.plan.outputs.cre }}
+          key: tree/${{ matrix.name }}/${{ needs.plan.outputs.base }}/${{ needs.plan.outputs.cre }}
 
       - name: Save compiler cache
         if: steps.tree.outputs.cache-matched-key == ''
         uses: actions/cache/save@v4
         with:
           path: ccache
-          key: ccache/${{ matrix.target }}/${{ needs.plan.outputs.base }}
+          key: ccache/${{ matrix.name }}/${{ needs.plan.outputs.base }}
 
       # Each crengine commit saves a new tree; keep only the newest.
       - name: Remove older build trees
         if: steps.tree.outputs.cache-hit != 'true'
         env:
-          KEEP: tree/${{ matrix.target }}/${{ needs.plan.outputs.base }}/${{ needs.plan.outputs.cre }}
+          KEEP: tree/${{ matrix.name }}/${{ needs.plan.outputs.base }}/${{ needs.plan.outputs.cre }}
         run: |
-          gh cache list -R "$GITHUB_REPOSITORY" --key "tree/$TARGET/" --limit 100 --json key --jq '.[].key' \
+          gh cache list -R "$GITHUB_REPOSITORY" --key "tree/$NAME/" --limit 100 --json key --jq '.[].key' \
             | { grep -vx "$KEEP" || true; } | while read -r key; do
                 gh cache delete -R "$GITHUB_REPOSITORY" "$key" || true
               done
@@ -286,17 +291,17 @@ jobs:
           strings "$lib" | grep -qx "$CRE_SHORT" \
             || { echo "::error::$lib does not contain the build commit"; exit 1; }
           # Uncompressed: the device installs it as it is (about 2 MB).
-          file=libkoreader-cre-$FP-$TARGET.so
+          file=libkoreader-cre-$FP-$NAME.so
           mkdir -p out
           cp "$lib" "out/$file"
-          jq -n --arg t "$TARGET" --arg file "$file" \
+          jq -n --arg t "$NAME" --arg file "$file" \
             --arg sha "$(sha256sum "$lib" | cut -d' ' -f1)" --argjson size "$(stat -c %s "$lib")" \
-            '{target: $t, file: $file, sha256: $sha, size: $size}' > "out/$TARGET.json"
-          cat "out/$TARGET.json"
+            '{target: $t, file: $file, sha256: $sha, size: $size}' > "out/$NAME.json"
+          cat "out/$NAME.json"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: engine-${{ matrix.target }}
+          name: engine-${{ matrix.name }}
           path: out/
           retention-days: 3
 

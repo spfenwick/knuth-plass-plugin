@@ -75,12 +75,29 @@ function Engine.koreaderRef(rev)
     return rev:match("^(v%d+%.%d+[%.%d]*)$") or rev:match("^(v%d+%.%d+[%.%d]*)_")
 end
 
---- KOReader's name for this device's builds (kobo, kobov5, kindlehf, …).
+local linux_arch = { x64 = "x86_64", arm64 = "aarch64", arm = "armhf" }
+
+--- KOReader's name for this device's builds (kobo, kindlehf, linux-x86_64, …).
 function Engine.target()
     local ok, Device = pcall(require, "device")
-    if not ok or not Device.otaModel then return nil end
-    local ok_model, model = pcall(Device.otaModel, Device)
-    return ok_model and model or nil
+    if not ok then return nil end
+    if Device.otaModel then
+        local ok_model, model = pcall(Device.otaModel, Device)
+        if ok_model and type(model) == "string" then
+            -- An AppImage is KOReader's Linux build, packaged.
+            return (model:gsub("^appimage%-", "linux-"))
+        end
+    end
+    -- KOReader's Linux packages (.deb, tarball) have no updater, so no name.
+    -- (Not the Flatpak, which is built separately.)
+    local function is(flag)
+        return type(Device[flag]) == "function" and Device[flag](Device) == true
+    end
+    if jit.os == "Linux" and (is("isDesktop") or is("isEmulator")) and Device.model ~= "Flatpak"
+            and linux_arch[jit.arch] then
+        return "linux-" .. linux_arch[jit.arch]
+    end
+    return nil
 end
 
 --- KOReader's own engine (which the plugin no longer changes).
