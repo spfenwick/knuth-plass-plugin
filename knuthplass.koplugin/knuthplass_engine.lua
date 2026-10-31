@@ -2,10 +2,15 @@
 Installs the Knuth–Plass CREngine (libs/libkoreader-cre.so) built by the
 plugin repository's "Build engine" workflow.
 
-The library has to match the koreader-base it runs with, so the manifest
-lists builds by koreader-base commit and device (KOReader's OTA model). A
-device finds its base from the commit in its version string through the
-GitHub API.
+The library only has to agree with the rest of KOReader where they meet
+(cre.cpp's Lua API and the shared libraries it links), so the manifest lists
+builds by a fingerprint of those parts of koreader-base, and maps each
+koreader-base it has seen to one. A device finds its koreader-base from the
+commit in its version string through the GitHub API. If the manifest has no
+entry for it, the newest build is offered instead. Either way, before
+installing, the library is loaded in a child process (which fails if a
+library or symbol it needs is missing), and must provide every function of
+the running engine (which KOReader's Lua code may call).
 
 Installing keeps the standard engine as libkoreader-cre.so.stock and swaps
 the new one in by renaming. Until a book has opened with the new engine,
@@ -34,10 +39,11 @@ local Engine = {
 -- State ---------------------------------------------------------------------
 --
 -- G_reader_settings[settings_key]:
---   pending     = { commit, rev, attempts, start_with = { value } }
+--   pending     = { commit, id, rev, attempts, start_with = { value } }
 --                 an installed engine not yet seen working
 --   stock_rev   = the KOReader version libkoreader-cre.so.stock is from
---   bad         = { [commit] = true }: builds that failed, never offered again
+--   bad         = { [build id @ revision] = true }: builds that failed with
+--                 this KOReader version, not offered again
 --   rolled_back = { commit, reason }: to tell the user once
 --   skip        = a build the user chose to skip
 --   base_cache  = { rev, base }: this KOReader's koreader-base commit
@@ -118,16 +124,46 @@ function Engine.baseCommit(fetch)
     return info.sha
 end
 
---- The manifest's build for this base and target, or nil.
+local function validBuild(build)
+    return type(build) == "table" and type(build.url) == "string" and build.url:match("^https://")
+        and type(build.sha256) == "string" and #build.sha256 == 64 and build.sha256:match("^%x+$")
+        and type(build.commit) == "string" and build.commit ~= ""
+        and true or false
+end
+
+--- The manifest's build for this koreader-base and target, and true; or,
+-- with no build listed for this koreader-base, the newest one for target
+-- and false; or nil.
 function Engine.findBuild(manifest, base, target)
-    local builds = type(manifest) == "table" and type(manifest.builds) == "table" and manifest.builds[base]
-    local build = type(builds) == "table" and builds[target]
-    if type(build) ~= "table" or type(build.url) ~= "string" or not build.url:match("^https://")
-            or type(build.sha256) ~= "string" or #build.sha256 ~= 64 or not build.sha256:match("^%x+$")
-            or type(build.commit) ~= "string" or build.commit == "" then
+    if type(manifest) ~= "table" or manifest.schema ~= 2 or type(manifest.builds) ~= "table" then
         return nil
     end
-    return build
+    local fingerprint = type(manifest.bases) == "table" and manifest.bases[base]
+    local builds = fingerprint and manifest.builds[fingerprint]
+    local build = type(builds) == "table" and builds[target]
+    if validBuild(build) then
+        return build, true
+    end
+    local newest
+    for _fp, per_target in pairs(manifest.builds) do
+        build = type(per_target) == "table" and per_target[target]
+        if validBuild(build) and (not newest or tostring(build.built) > tostring(newest.built)) then
+            newest = build
+        end
+    end
+    if newest then
+        return newest, false
+    end
+    return nil
+end
+
+--- What identifies a build (the same crengine commit is built per fingerprint).
+function Engine.buildId(build)
+    return build.commit .. "/" .. tostring(build.file)
+end
+
+local function badKey(id)
+    return id .. "@" .. tostring(Engine.revision())
 end
 
 function Engine.fetchManifest(fetch)
@@ -215,7 +251,7 @@ function Engine.restoreStock(reason)
         restoreStartWith(state.pending)
         if reason then
             state.bad = state.bad or {}
-            state.bad[state.pending.commit] = true
+            state.bad[badKey(state.pending.id or state.pending.commit)] = true
             state.rolled_back = { commit = state.pending.commit, reason = reason }
         end
         state.pending = nil
@@ -296,11 +332,8 @@ end
 
 -- Installing ------------------------------------------------------------------
 
---- Install build (data is the downloaded library) over the running engine.
--- running_is_standard: the running engine is KOReader's own, so it is kept
--- as libkoreader-cre.so.stock (otherwise an existing copy is kept).
--- @return true, or nil and an error message
-function Engine.install(build, data, running_is_standard)
+--- Check the downloaded library against the manifest.
+function Engine.verifyDownload(build, data)
     local sha2 = require("ffi/sha2")
     if (build.size and #data ~= build.size) or sha2.sha256(data):lower() ~= build.sha256:lower() then
         return nil, _("the download is damaged (checksum mismatch)")
@@ -309,6 +342,16 @@ function Engine.install(build, data, running_is_standard)
     if data:sub(1, 4) ~= "\127ELF" then
         return nil, _("the download is not a library")
     end
+    return true
+end
+
+--- Install build (data is the downloaded library) over the running engine.
+-- running_is_standard: the running engine is KOReader's own, so it is kept
+-- as libkoreader-cre.so.stock (otherwise an existing copy is kept).
+-- @return true, or nil and an error message
+function Engine.install(build, data, running_is_standard)
+    local ok, err = Engine.verifyDownload(build, data)
+    if not ok then return nil, err end
     local lib = Engine.libPath()
     local state = Engine.getState()
     local rev = Engine.revision()
@@ -321,15 +364,125 @@ function Engine.install(build, data, running_is_standard)
         if not ok then return nil, err end
         state.stock_rev = rev
     end
-    local ok, err = replaceFile(lib, data)
+    ok, err = replaceFile(lib, data)
     if not ok then return nil, err end
-    local pending = { commit = build.commit, rev = rev, attempts = 0 }
+    local pending = { commit = build.commit, id = Engine.buildId(build), rev = rev, attempts = 0 }
     forceFileBrowserStart(pending)
     state.pending = pending
     Engine.saveState(state)
     -- This session still runs the old engine: only a restart can prove it.
     Engine.guard_active = false
     logger.info("KnuthPlass: installed engine", build.commit)
+    return true
+end
+
+-- Compatibility ---------------------------------------------------------------
+
+-- The metatables cre.cpp registers: its methods on documents and images.
+local CRE_METATABLES = { "credocument", "creimage" }
+
+--- The functions a cre module provides (KOReader's Lua code calls them):
+-- { ["cre.name"] = true, ["credocument:name"] = true, … }
+function Engine.creApi(module, registry)
+    local api = {}
+    if type(module) == "table" then
+        for name, value in pairs(module) do
+            if type(value) == "function" then api["cre." .. name] = true end
+        end
+    end
+    for _i, mt_name in ipairs(CRE_METATABLES) do
+        local mt = registry[mt_name]
+        if type(mt) == "table" then
+            for name, value in pairs(mt) do
+                if type(value) == "function" then api[mt_name .. ":" .. name] = true end
+            end
+        end
+    end
+    return api
+end
+
+--- Load the library at path in a child process.
+-- @return its API (see creApi), or nil and an error message
+function Engine.probeLibrary(path)
+    local ffiutil = require("ffi/util")
+    local pid, read_fd = ffiutil.runInSubProcess(function(_pid, write_fd)
+        -- The running engine's tables would hide what the new one lacks.
+        local registry = debug.getregistry()
+        for _i, mt_name in ipairs(CRE_METATABLES) do registry[mt_name] = nil end
+        package.loaded.cre = nil
+        rawset(_G, "cre", nil)
+        -- Resolves every symbol now: fails if one is missing.
+        local open, err = package.loadlib(path, "luaopen_cre")
+        local out
+        if not open then
+            out = "ERR " .. tostring(err)
+        else
+            local ok, module = pcall(open)
+            if not ok then
+                out = "ERR " .. tostring(module)
+            else
+                if type(module) ~= "table" then module = package.loaded.cre end
+                local names = {}
+                for name in pairs(Engine.creApi(module, registry)) do table.insert(names, name) end
+                out = "OK\n" .. table.concat(names, "\n")
+            end
+        end
+        ffiutil.writeToFD(write_fd, out, true)
+    end, true)
+    if not pid then
+        return nil, tostring(read_fd)
+    end
+    -- Give it 20 seconds.
+    local done = false
+    for _i = 1, 200 do
+        if ffiutil.isSubProcessDone(pid) then
+            done = true
+            break
+        end
+        ffiutil.usleep(100000)
+    end
+    if not done then
+        ffiutil.terminateSubProcess(pid)
+        ffiutil.isSubProcessDone(pid, true)
+        ffiutil.readAllFromFD(read_fd)
+        return nil, _("loading it took too long")
+    end
+    local out = ffiutil.readAllFromFD(read_fd)
+    if out:sub(1, 3) == "OK\n" then
+        local api = {}
+        for name in out:sub(4):gmatch("[^\n]+") do api[name] = true end
+        return api
+    elseif out:sub(1, 4) == "ERR " then
+        return nil, out:sub(5)
+    end
+    return nil, _("it crashed when loaded")
+end
+
+--- Check that the library (data) works with this KOReader: it loads, and
+-- provides every function the running engine does.
+-- @return true, or nil and an error message
+function Engine.checkCompatible(data)
+    -- Next to the engine, so it finds the same libraries.
+    local probe = Engine.libPath() .. ".probe"
+    local ok, err = writeFile(probe, data)
+    if not ok then return nil, err end
+    local api
+    api, err = Engine.probeLibrary(probe)
+    os.remove(probe)
+    if not api then
+        return nil, T(_("it doesn't load with this KOReader (%1)"), tostring(err))
+    end
+    local running = package.loaded["libs/libkoreader-cre"]
+    if running then
+        local missing = {}
+        for name in pairs(Engine.creApi(running, debug.getregistry())) do
+            if not api[name] then table.insert(missing, name) end
+        end
+        if #missing > 0 then
+            table.sort(missing)
+            return nil, T(_("it lacks functions this KOReader uses (%1)"), table.concat(missing, ", "))
+        end
+    end
     return true
 end
 
@@ -360,6 +513,19 @@ function Engine.downloadAndInstall(plugin, build, current_build, fetch, quiet)
     local data, err = fetch(build.url, Engine.max_lib_size)
     local ok
     if data then
+        ok, err = Engine.verifyDownload(build, data)
+    end
+    if ok then
+        ok, err = Engine.checkCompatible(data)
+        if not ok then
+            -- Don't offer it again with this KOReader version.
+            local state = Engine.getState()
+            state.bad = state.bad or {}
+            state.bad[badKey(Engine.buildId(build))] = true
+            Engine.saveState(state)
+        end
+    end
+    if ok then
         -- An engine without the Knuth–Plass settings is KOReader's own.
         ok, err = Engine.install(build, data, current_build == "" and not plugin.active)
     end
@@ -376,7 +542,7 @@ function Engine.downloadAndInstall(plugin, build, current_build, fetch, quiet)
     return true
 end
 
-local function offerInstall(plugin, build, current_build, fetch, interactive)
+local function offerInstall(plugin, build, exact, current_build, fetch, interactive)
     local ConfirmBox = require("ui/widget/confirmbox")
     local UIManager = require("ui/uimanager")
     local text
@@ -384,6 +550,9 @@ local function offerInstall(plugin, build, current_build, fetch, interactive)
         text = T(_("This KOReader's engine has no Knuth–Plass line breaking. Install the Knuth–Plass engine %1?"), build.commit)
     else
         text = T(_("Knuth–Plass engine %1 is available (installed: %2)."), build.commit, Engine.buildText(current_build))
+    end
+    if not exact then
+        text = text .. "\n\n" .. T(_("It was built for another KOReader version (%1). It will be checked against this one before it's installed."), tostring(build.koreader))
     end
     local dialog
     dialog = ConfirmBox:new{
@@ -433,9 +602,9 @@ function Engine.check(plugin, interactive, mode, fetch, report)
         table.insert(report, T(_("Engine: could not check (%1)."), tostring(err)))
         return false
     end
-    local build = Engine.findBuild(manifest, base, target)
+    local build, exact = Engine.findBuild(manifest, base, target)
     if not build then
-        table.insert(report, T(_("Engine: no build for this KOReader version yet (koreader-base %1)."), base:sub(1, 12)))
+        table.insert(report, _("Engine: no builds yet."))
         return false
     end
     if build.commit == current_build then
@@ -443,8 +612,8 @@ function Engine.check(plugin, interactive, mode, fetch, report)
         return false
     end
     local state = Engine.getState()
-    if state.bad and state.bad[build.commit] then
-        table.insert(report, T(_("Engine: build %1 failed on this device before, so it isn't offered again."), build.commit))
+    if state.bad and state.bad[badKey(Engine.buildId(build))] then
+        table.insert(report, T(_("Engine: build %1 didn't work with this KOReader version, so it isn't offered again."), build.commit))
         return false
     end
     if not interactive and state.skip == build.commit then
@@ -453,7 +622,7 @@ function Engine.check(plugin, interactive, mode, fetch, report)
     if not interactive and mode == "install" then
         return Engine.downloadAndInstall(plugin, build, current_build, fetch, true)
     end
-    offerInstall(plugin, build, current_build, fetch, interactive)
+    offerInstall(plugin, build, exact, current_build, fetch, interactive)
     return true
 end
 

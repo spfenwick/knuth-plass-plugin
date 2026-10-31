@@ -535,11 +535,26 @@ do
     assert(Engine.koreaderRef(nil) == nil and Engine.koreaderRef("junk") == nil)
 
     local sha = string.rep("a", 64)
-    local manifest = { builds = { base1 = { kobo = { url = "https://x/lib.so", sha256 = sha, commit = "abc" } } } }
-    assert(Engine.findBuild(manifest, "base1", "kobo").commit == "abc")
-    assert(Engine.findBuild(manifest, "base2", "kobo") == nil)
+    local function entry(commit, built, url)
+        return { kobo = { url = url or "https://x/lib.so", sha256 = sha, commit = commit, built = built,
+                          file = "lib-" .. commit .. ".so" } }
+    end
+    local manifest = {
+        schema = 2,
+        builds = { fpA = entry("abc", "2026-10-01T00:00:00Z"), fpB = entry("def", "2026-10-20T00:00:00Z") },
+        bases = { base1 = "fpA", base2 = "fpB" },
+    }
+    -- The build for this koreader-base…
+    local b, exact = Engine.findBuild(manifest, "base1", "kobo")
+    assert(b.commit == "abc" and exact == true)
+    -- …or else the newest.
+    b, exact = Engine.findBuild(manifest, "base9", "kobo")
+    assert(b.commit == "def" and exact == false)
     assert(Engine.findBuild(manifest, "base1", "kobov5") == nil)
-    assert(Engine.findBuild({ builds = { base1 = { kobo = { url = "http://x", sha256 = sha, commit = "abc" } } } }, "base1", "kobo") == nil)
+    -- Not https, or the old manifest format: nothing.
+    assert(Engine.findBuild({ schema = 2, builds = { fpA = entry("abc", "x", "http://x") }, bases = { base1 = "fpA" } }, "base1", "kobo") == nil)
+    assert(Engine.findBuild({ builds = { base1 = entry("abc") } }, "base1", "kobo") == nil)
+    assert(Engine.buildId(manifest.builds.fpA.kobo) == "abc/lib-abc.so")
 
     -- A KOReader folder of our own, with the standard engine.
     local dir = os.tmpname()
@@ -590,7 +605,7 @@ do
     assert(CreDocument.engineInit() == "cre")
     assert(read(lib) == "\127ELF standard")
     local state = Engine.getState()
-    assert(state.pending == nil and state.bad.bad)
+    assert(state.pending == nil and state.bad["bad/nil@v2026.07.2-299-g8012773_2026-10-30"])
     assert(G_reader_settings.store.start_with == "last")
     local rolled_back = Engine.takeRollback()
     assert(rolled_back.commit == "bad" and rolled_back.reason:find("undefined symbol", 1, true))
@@ -622,7 +637,7 @@ do
     restart()
     assert(CreDocument.engineInit() == "cre")
     assert(read(lib) == "\127ELF standard")
-    assert(Engine.getState().bad.crashy)
+    assert(Engine.getState().bad["crashy/nil@v2026.07.2-299-g8012773_2026-10-30"])
 
     -- After a KOReader update (which replaced the library) the guard stands down.
     b, data = build("other")
@@ -639,6 +654,29 @@ do
     Engine.saveState(state)
     assert(not Engine.hasStock())
     assert(not Engine.restoreStock())
+
+    -- Compatibility: the new library must load and provide every function
+    -- of the running engine (module functions and document methods).
+    local probe = Engine.probeLibrary
+    local registry = debug.getregistry()
+    registry.credocument = { getStringProperty = function() end, __index = true }
+    package.loaded["libs/libkoreader-cre"] = { newDocView = function() end, getVersion = function() end }
+    local api = Engine.creApi(package.loaded["libs/libkoreader-cre"], registry)
+    assert(api["cre.newDocView"] and api["credocument:getStringProperty"] and not api["credocument:__index"])
+    Engine.probeLibrary = function() return { ["cre.newDocView"] = true, ["credocument:getStringProperty"] = true } end
+    local ok, err = Engine.checkCompatible("\127ELF x")
+    assert(not ok and err:find("cre.getVersion", 1, true), err)
+    Engine.probeLibrary = function() return nil, "undefined symbol: FT_Foo" end
+    ok, err = Engine.checkCompatible("\127ELF x")
+    assert(not ok and err:find("FT_Foo", 1, true), err)
+    Engine.probeLibrary = function()
+        return { ["cre.newDocView"] = true, ["cre.getVersion"] = true, ["credocument:getStringProperty"] = true, ["cre.extra"] = true }
+    end
+    assert(Engine.checkCompatible("\127ELF x"))
+    assert(not read(lib .. ".probe")) -- cleaned up
+    Engine.probeLibrary = probe
+    registry.credocument = nil
+    package.loaded["libs/libkoreader-cre"] = nil
 
     os.execute("rm -rf '" .. dir .. "'")
 end

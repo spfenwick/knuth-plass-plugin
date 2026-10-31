@@ -139,19 +139,27 @@ Once the plugin is up to date, the check also looks for a Knuth–Plass
 engine build for this device and KOReader version, and installs it the same
 way (Kobo only, for now):
 
-- The engine has to match the KOReader build (its koreader-base), so the
-  "Build engine" workflow builds it for the latest nightly's koreader-base
-  and lists it in the `engine` release's `manifest.json`. A device finds its
-  koreader-base from the commit in its KOReader version.
+- The engine only has to agree with the rest of KOReader where they meet:
+  `cre.cpp` (the functions KOReader's Lua code calls) and the libraries it
+  links. The "Build engine" workflow builds it for the latest nightly and
+  lists it in the `engine` release's `manifest.json` under a fingerprint of
+  those parts of koreader-base. Nightlies with the same fingerprint share
+  the build, so most don't need a new one. A device finds its koreader-base
+  from the commit in its KOReader version; if the manifest doesn't list it,
+  the newest build is offered.
+- Before installing, the plugin loads the new engine in a separate process
+  (which fails if a library or function it needs is missing from this
+  KOReader) and checks it has every function of the running engine. A build
+  that fails isn't offered again for this KOReader version.
 - KOReader's own engine is kept as `libs/libkoreader-cre.so.stock`, and the
   dialog's "Restore standard engine" puts it back.
 - Until a book has opened with a new engine, KOReader starts in the file
   browser (so the plugin loads before the engine). If the engine fails to
   load, or KOReader stops twice before a book opened with it, the standard
-  engine is put back and that build isn't offered again.
-- Updating KOReader replaces the engine with its standard one; the next
-  check offers the Knuth–Plass engine again once there's a build for the new
+  engine is put back and that build isn't offered again for this KOReader
   version.
+- Updating KOReader replaces the engine with its standard one; the next
+  check offers the Knuth–Plass engine again.
 
 To publish a release, set `version` in `_meta.lua` and push a matching
 tag (`v0.2.0`). The release workflow tests, packages and publishes it.

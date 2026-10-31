@@ -5,16 +5,24 @@
 #
 #   https://github.com/<repo>/releases/download/engine/manifest.json
 #
-#   { "crengine": {"repo": "...", "ref": "...", "commit": "<12 hex>"},
-#     "builds": { "<koreader-base commit>": { "<target>": {
+#   { "schema": 2,
+#     "crengine": {"repo": "...", "ref": "...", "commit": "<12 hex>"},
+#     "builds": { "<fingerprint>": { "<target>": {
 #         "file": "...", "url": "...", "sha256": "...", "size": n,
 #         "commit": "<12 hex>", "koreader": "<nightly it was built for>",
-#         "built": "<ISO time>" } } } }
+#         "base": "<koreader-base commit>", "built": "<ISO time>" } } },
+#     "bases": { "<koreader-base commit>": "<fingerprint>" } }
 #
-# The library only has to match koreader-base, so builds are keyed by its
-# commit: one build serves every nightly with that base. A device finds its
-# base from the commit in its version (v2026.07.2-299-g8012773_… → 8012773)
-# through the GitHub API (repos/koreader/koreader/contents/base?ref=…).
+# The library only has to agree with the rest of KOReader where they meet:
+# cre.cpp (the Lua API KOReader's frontend calls), its build options, and
+# the shared libraries it links (of which only lunasvg, a C++ library
+# without a versioned soname, can change incompatibly without failing to
+# load). The fingerprint is a hash of those parts of koreader-base, so most
+# new nightlies need no new build: their koreader-base is just recorded in
+# "bases" as using the existing one. A device finds its koreader-base from
+# the commit in its version (v2026.07.2-299-g8012773_… → 8012773); with no
+# entry for it, the plugin falls back to the newest build and checks it
+# against the running engine before installing.
 name: Build engine
 
 on:
@@ -84,8 +92,23 @@ jobs:
           ref=$IN_REF
           cre=$(gh api "repos/$CRENGINE_REPO/commits/$ref" --jq .sha)
           base=$(gh api "repos/koreader/koreader/contents/base?ref=$ko_ref" --jq .sha)
-          echo "Building $TARGET: KOReader $ko_version (base $base), crengine $ref @ $cre"
+          # Git's ids of the parts of koreader-base the engine depends on.
+          parts=$(
+            {
+              gh api "repos/koreader/koreader-base/contents?ref=$base" \
+                --jq '.[] | select(.name == "cre.cpp" or .name == "cre.h") | .path + " " + .sha'
+              gh api "repos/koreader/koreader-base/contents/cmake?ref=$base" \
+                --jq '.[] | select(.name == "crengine") | .path + " " + .sha'
+              gh api "repos/koreader/koreader-base/contents/thirdparty?ref=$base" \
+                --jq '.[] | select(.name == "lunasvg") | .path + " " + .sha'
+            } | sort
+          )
+          echo "$parts"
+          [ "$(wc -l <<< "$parts")" -eq 4 ] || { echo "::error::koreader-base layout changed"; exit 1; }
+          fp=$(sha256sum <<< "$parts" | cut -c1-16)
+          echo "Building $TARGET: KOReader $ko_version (base $base, fingerprint $fp), crengine $ref @ $cre"
           {
+            echo "fp=$fp"
             echo "koreader=$ko_version"
             echo "base=$base"
             echo "base_short=${base:0:12}"
@@ -94,20 +117,35 @@ jobs:
             echo "cre_short=${cre:0:12}"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Skip if already published
-        id: skip
+      # A build is needed when there's none of this crengine commit for this
+      # fingerprint; otherwise at most the koreader-base is recorded.
+      - name: Plan
+        id: plan
         env:
           FORCE: ${{ inputs.force || false }}
+          FP: ${{ steps.v.outputs.fp }}
+          BASE: ${{ steps.v.outputs.base }}
+          CRE_SHORT: ${{ steps.v.outputs.cre_short }}
         run: |
           set -euo pipefail
-          published=$(gh release download "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" \
-              -p manifest.json -O - 2>/dev/null \
-            | jq -r --arg base "${{ steps.v.outputs.base }}" --arg t "$TARGET" \
-              '.builds[$base][$t].commit // ""' || true)
-          if [ "$published" = "${{ steps.v.outputs.cre_short }}" ] && [ "$FORCE" != "true" ]; then
-            echo "Already published."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
+          gh release download "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" -p manifest.json -O old.json 2>/dev/null \
+            || echo '{}' > old.json
+          # Builds listed by koreader-base (before schema 2) are dropped.
+          jq -e '.schema == 2' old.json >/dev/null || echo '{"schema": 2}' > old.json
+          published=$(jq -r --arg fp "$FP" --arg t "$TARGET" '.builds[$fp][$t].commit // ""' old.json)
+          recorded=$(jq -r --arg base "$BASE" '.bases[$base] // ""' old.json)
+          build=true
+          if [ "$published" = "$CRE_SHORT" ] && [ "$FORCE" != "true" ]; then
+            echo "Build $CRE_SHORT for fingerprint $FP is already published."
+            build=false
           fi
+          publish=$build
+          [ "$recorded" = "$FP" ] || publish=true
+          echo "build=$build publish=$publish"
+          {
+            echo "build=$build"
+            echo "publish=$publish"
+          } >> "$GITHUB_OUTPUT"
 
       # The whole koreader-base tree (sources, crengine checkout and build
       # output) is kept between runs, per koreader-base commit: a new
@@ -115,7 +153,7 @@ jobs:
       # koreader-base (or an evicted cache) starts from scratch, with
       # ccache's help.
       - name: Restore build tree
-        if: steps.skip.outputs.skip != 'true'
+        if: steps.plan.outputs.build == 'true'
         id: tree
         uses: actions/cache/restore@v4
         with:
@@ -125,7 +163,7 @@ jobs:
             tree-${{ env.TARGET }}-${{ steps.v.outputs.base }}-
 
       - name: Restore compiler cache
-        if: steps.skip.outputs.skip != 'true' && steps.tree.outputs.cache-matched-key == ''
+        if: steps.plan.outputs.build == 'true' && steps.tree.outputs.cache-matched-key == ''
         uses: actions/cache/restore@v4
         with:
           path: ccache
@@ -134,7 +172,7 @@ jobs:
             ccache-${{ env.TARGET }}-
 
       - name: Check out koreader-base
-        if: steps.skip.outputs.skip != 'true' && steps.tree.outputs.cache-matched-key == ''
+        if: steps.plan.outputs.build == 'true' && steps.tree.outputs.cache-matched-key == ''
         uses: actions/checkout@v4
         with:
           repository: koreader/koreader-base
@@ -146,7 +184,7 @@ jobs:
       # restored tree, checking out the new commit only touches the files
       # it changed, so only those are rebuilt.
       - name: Check out the Knuth–Plass crengine
-        if: steps.skip.outputs.skip != 'true'
+        if: steps.plan.outputs.build == 'true'
         run: |
           set -euo pipefail
           dir=base/thirdparty/kpvcrlib/crengine
@@ -159,7 +197,7 @@ jobs:
           git -C "$dir" log --oneline -1
 
       - name: Build
-        if: steps.skip.outputs.skip != 'true'
+        if: steps.plan.outputs.build == 'true'
         run: |
           set -euo pipefail
           mkdir -p ccache
@@ -175,14 +213,14 @@ jobs:
 
       # Saved before packaging, so a later failure doesn't lose the build.
       - name: Save build tree
-        if: steps.skip.outputs.skip != 'true' && steps.tree.outputs.cache-hit != 'true'
+        if: steps.plan.outputs.build == 'true' && steps.tree.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: base
           key: tree-${{ env.TARGET }}-${{ steps.v.outputs.base }}-${{ steps.v.outputs.cre }}
 
       - name: Save compiler cache
-        if: steps.skip.outputs.skip != 'true' && steps.tree.outputs.cache-matched-key == ''
+        if: steps.plan.outputs.build == 'true' && steps.tree.outputs.cache-matched-key == ''
         uses: actions/cache/save@v4
         with:
           path: ccache
@@ -190,7 +228,7 @@ jobs:
 
       # Each crengine commit saves a new tree; keep only the newest.
       - name: Remove older build trees
-        if: steps.skip.outputs.skip != 'true' && steps.tree.outputs.cache-hit != 'true'
+        if: steps.plan.outputs.build == 'true' && steps.tree.outputs.cache-hit != 'true'
         env:
           KEEP: tree-${{ env.TARGET }}-${{ steps.v.outputs.base }}-${{ steps.v.outputs.cre }}
         run: |
@@ -200,7 +238,7 @@ jobs:
               done
 
       - name: Package
-        if: steps.skip.outputs.skip != 'true'
+        if: steps.plan.outputs.build == 'true'
         id: pkg
         run: |
           set -euo pipefail
@@ -210,7 +248,7 @@ jobs:
           strings "$lib" | grep -qx "${{ steps.v.outputs.cre_short }}" \
             || { echo "::error::$lib does not contain the build commit"; exit 1; }
           # Uncompressed: the device installs it as it is (about 2 MB).
-          file=libkoreader-cre-${{ steps.v.outputs.base_short }}-$TARGET.so
+          file=libkoreader-cre-${{ steps.v.outputs.fp }}-$TARGET.so
           mkdir -p out
           cp "$lib" "out/$file"
           echo "file=$file" >> "$GITHUB_OUTPUT"
@@ -218,7 +256,12 @@ jobs:
           echo "size=$(stat -c %s "$lib")" >> "$GITHUB_OUTPUT"
 
       - name: Publish
-        if: steps.skip.outputs.skip != 'true'
+        if: steps.plan.outputs.publish == 'true'
+        env:
+          BUILT: ${{ steps.plan.outputs.build }}
+          FP: ${{ steps.v.outputs.fp }}
+          BASE: ${{ steps.v.outputs.base }}
+          FILE: ${{ steps.pkg.outputs.file }}
         run: |
           set -euo pipefail
           if ! gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
@@ -226,20 +269,31 @@ jobs:
               --title "Knuth–Plass engine builds" \
               --notes "CREngine builds for the plugin's updater. See manifest.json."
           fi
-          gh release download "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" -p manifest.json -O old.json 2>/dev/null \
-            || echo '{}' > old.json
-          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/${{ steps.pkg.outputs.file }}"
-          jq --arg repo "$CRENGINE_REPO" --arg ref "${{ steps.v.outputs.ref }}" \
-             --arg commit "${{ steps.v.outputs.cre_short }}" \
-             --arg base "${{ steps.v.outputs.base }}" --arg ko "${{ steps.v.outputs.koreader }}" --arg t "$TARGET" \
-             --arg file "${{ steps.pkg.outputs.file }}" --arg url "$url" \
-             --arg sha "${{ steps.pkg.outputs.sha256 }}" --argjson size "${{ steps.pkg.outputs.size }}" \
-             --arg built "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-             '.crengine = {repo: $repo, ref: $ref, commit: $commit}
-              | .builds[$base][$t] = {file: $file, url: $url, sha256: $sha, size: $size,
-                                      commit: $commit, koreader: $ko, built: $built}' \
-             old.json > out/manifest.json
+          mkdir -p out
+          # This koreader-base uses this fingerprint's build.
+          jq --arg base "$BASE" --arg fp "$FP" '.bases[$base] = $fp' old.json > out/manifest.json
+          if [ "$BUILT" = "true" ]; then
+            url="https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$FILE"
+            jq --arg repo "$CRENGINE_REPO" --arg ref "${{ steps.v.outputs.ref }}" \
+               --arg commit "${{ steps.v.outputs.cre_short }}" \
+               --arg fp "$FP" --arg base "$BASE" --arg ko "${{ steps.v.outputs.koreader }}" --arg t "$TARGET" \
+               --arg file "$FILE" --arg url "$url" \
+               --arg sha "${{ steps.pkg.outputs.sha256 }}" --argjson size "${{ steps.pkg.outputs.size }}" \
+               --arg built "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+               '.crengine = {repo: $repo, ref: $ref, commit: $commit}
+                | .builds[$fp][$t] = {file: $file, url: $url, sha256: $sha, size: $size,
+                                      commit: $commit, koreader: $ko, base: $base, built: $built}' \
+               out/manifest.json > out/next.json
+            mv out/next.json out/manifest.json
+            # The library first, so the manifest never points at a missing file.
+            gh release upload "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --clobber "out/$FILE"
+          fi
           cat out/manifest.json
-          # The library first, so the manifest never points at a missing file.
-          gh release upload "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --clobber "out/${{ steps.pkg.outputs.file }}"
           gh release upload "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --clobber out/manifest.json
+          # Remove libraries the manifest no longer lists.
+          gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' \
+            | grep '^libkoreader-cre-' \
+            | grep -vxF -f <(jq -r '.builds[][].file' out/manifest.json) \
+            | while read -r name; do
+                gh release delete-asset "$RELEASE_TAG" "$name" -R "$GITHUB_REPOSITORY" -y || true
+              done
