@@ -15,5 +15,6 @@ cd "$repo_dir"
 "$lua_bin" tests/check_lua_syntax.lua \
     knuthplass.koplugin/_meta.lua \
     knuthplass.koplugin/main.lua \
-    knuthplass.koplugin/knuthplass_updater.lua
+    knuthplass.koplugin/knuthplass_updater.lua \
+    knuthplass.koplugin/knuthplass_engine.lua
 "$lua_bin" tests/test_plugin.lua

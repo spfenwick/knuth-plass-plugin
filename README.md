@@ -6,9 +6,10 @@ penalties, emergency stretch, hyphenation penalties, and the line breaking of
 ragged (left-aligned, right-aligned and centered) text.
 
 It needs a CREngine that has Knuth–Plass paragraph formatting (the
-`knuth-plass` branch of [spfenwick/crengine](https://github.com/spfenwick/crengine)).
-With a stock engine the plugin stays inactive and the menu entry shows
-"(unavailable)".
+`knuth-plass-history` branch of [spfenwick/crengine](https://github.com/spfenwick/crengine)).
+With a stock engine the plugin stays inactive, and the menu entry ("install
+engine…") offers to install the Knuth–Plass engine where a build is
+available (Kobo, KOReader nightly; see [Updates](#updates)).
 
 ## Install
 
@@ -134,8 +135,28 @@ sets what happens once a day when KOReader is already online:
 An update is unpacked next to the plugin and swapped in only once it is
 complete and its checksum matches, and it takes effect after a restart.
 
+Once the plugin is up to date, the check also looks for a Knuth–Plass
+engine build for this device and KOReader version, and installs it the same
+way (Kobo only, for now):
+
+- The engine has to match the KOReader build (its koreader-base), so the
+  "Build engine" workflow builds it for the latest nightly's koreader-base
+  and lists it in the `engine` release's `manifest.json`. A device finds its
+  koreader-base from the commit in its KOReader version.
+- KOReader's own engine is kept as `libs/libkoreader-cre.so.stock`, and the
+  dialog's "Restore standard engine" puts it back.
+- Until a book has opened with a new engine, KOReader starts in the file
+  browser (so the plugin loads before the engine). If the engine fails to
+  load, or KOReader stops twice before a book opened with it, the standard
+  engine is put back and that build isn't offered again.
+- Updating KOReader replaces the engine with its standard one; the next
+  check offers the Knuth–Plass engine again once there's a build for the new
+  version.
+
 To publish a release, set `version` in `_meta.lua` and push a matching
 tag (`v0.2.0`). The release workflow tests, packages and publishes it.
+Engine builds are published by the "Build engine" workflow (on each push to
+the crengine branch, daily for new nightlies, or run by hand).
 
 ## Tests
 

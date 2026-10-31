@@ -64,7 +64,11 @@ function ButtonDialog:getScrolledOffset() return "offset" end
 function ButtonDialog:setScrolledOffset(offset) self.offset = offset end
 stub("ui/widget/buttondialog", ButtonDialog)
 stub("ui/widget/confirmbox", { new = function(_, o) return o end })
-stub("logger", { info = function() end, dbg = function() end })
+stub("logger", { info = function() end, dbg = function() end, warn = function() end })
+-- The engine module's files: a folder with no libs/libkoreader-cre.so.stock.
+local test_dir = os.getenv("TMPDIR") or "/tmp"
+stub("libs/libkoreader-lfs", { currentdir = function() return test_dir end })
+stub("version", { getCurrentRevision = function() return "v2026.07.2-299-g8012773_2026-10-30" end })
 stub("ffi/util", {
     template = function(fmt, ...)
         local args = { ... }
@@ -257,7 +261,7 @@ do
             end
         end
     end
-    assert(#dialog.buttons == 12, #dialog.buttons)
+    assert(#dialog.buttons == 13, #dialog.buttons)
     assert(dialog.width_factor == 0.95)
     -- Every button of a setting row has the same height (one line of a
     -- name) and its own id; names share one column width, without a
@@ -438,7 +442,7 @@ do
     assert(cre.props["crengine.style.ragged.hyphen.penalty"] == 300)
     -- Its row comes last among the settings, with "…" selected.
     local buttons = plugin:getDialogButtons()
-    assert(#buttons == 13, #buttons)
+    assert(#buttons == 14, #buttons)
     assert(buttons[10][1].text == "Ragged text", buttons[10][1].text)
     local labels = {}
     for i, button in ipairs(buttons[10]) do labels[i] = button.text end
@@ -501,14 +505,14 @@ do
     plugin:onReadSettings(ui.doc_settings)
     plugin:showDialog()
     local rows = plugin.dialog.buttons
-    local row = rows[#rows - 1]
+    local row = rows[#rows - 2]
     assert(row[1].text == "Check for updates (0.1.0)", row[1].text)
     assert(row[2].text == "Automatic updates: notify", row[2].text)
     row[2].callback()
     assert(Updater.getMode() == "install")
     rows = plugin.dialog.buttons
-    assert(rows[#rows - 1][2].text == "Automatic updates: install", rows[#rows - 1][2].text)
-    rows[#rows - 1][2].callback()
+    assert(rows[#rows - 2][2].text == "Automatic updates: install", rows[#rows - 2][2].text)
+    rows[#rows - 2][2].callback()
     assert(Updater.getMode() == "off")
 
     -- Opening a book schedules one automatic check per session; with
@@ -520,6 +524,123 @@ do
     assert(#scheduled == 1, #scheduled)
     scheduled[1].fn()
     assert(G_reader_settings.store.knuthplass_updates.last_check == nil)
+end
+
+-- Engine: versions, manifest lookup, install, the start-up guard and rollback.
+do
+    local Engine = require("knuthplass_engine")
+    assert(Engine.koreaderRef("v2026.07.2-299-g8012773_2026-10-30") == "8012773")
+    assert(Engine.koreaderRef("v2026.07.2-270-g426e93297_2026-10-20_emulator") == "426e93297")
+    assert(Engine.koreaderRef("v2026.07.1") == "v2026.07.1")
+    assert(Engine.koreaderRef(nil) == nil and Engine.koreaderRef("junk") == nil)
+
+    local sha = string.rep("a", 64)
+    local manifest = { builds = { base1 = { kobo = { url = "https://x/lib.so", sha256 = sha, commit = "abc" } } } }
+    assert(Engine.findBuild(manifest, "base1", "kobo").commit == "abc")
+    assert(Engine.findBuild(manifest, "base2", "kobo") == nil)
+    assert(Engine.findBuild(manifest, "base1", "kobov5") == nil)
+    assert(Engine.findBuild({ builds = { base1 = { kobo = { url = "http://x", sha256 = sha, commit = "abc" } } } }, "base1", "kobo") == nil)
+
+    -- A KOReader folder of our own, with the standard engine.
+    local dir = os.tmpname()
+    os.remove(dir)
+    assert(os.execute("mkdir -p '" .. dir .. "/libs'"))
+    test_dir = dir
+    local lib = dir .. "/libs/libkoreader-cre.so"
+    local function read(path)
+        local f = io.open(path, "rb")
+        if not f then return nil end
+        local d = f:read("*a"); f:close(); return d
+    end
+    local function write(path, d) local f = assert(io.open(path, "wb")); f:write(d); f:close() end
+    write(lib, "\127ELF standard")
+    -- Checksums: the builds below hash to their own names.
+    stub("ffi/sha2", { sha256 = function(d) return (d:match("^\127ELF (%w+)") or "x"):rep(64):sub(1, 64) end })
+    local function build(name)
+        local data = "\127ELF " .. name
+        return { commit = name, url = "https://x", sha256 = name:rep(64):sub(1, 64), size = #data }, data
+    end
+    -- A stand-in CreDocument whose engine fails to load when it's "bad".
+    local CreDocument = {}
+    function CreDocument.engineInit()
+        if read(lib):find("bad", 1, true) then error("undefined symbol") end
+        return "cre"
+    end
+    stub("document/credocument", CreDocument)
+    local function restart()
+        Engine.guard_active = nil
+        Engine.installGuard()
+    end
+
+    G_reader_settings = settings{ start_with = "last" }
+    G_reader_settings.flush = function() end
+
+    -- Damaged downloads are refused.
+    local b, data = build("good")
+    assert(not Engine.install(b, data .. "x", true))
+    assert(not Engine.install(b, "\127ELF other", true))
+    assert(read(lib) == "\127ELF standard")
+
+    -- An engine that fails to load is replaced by the standard one at once.
+    b, data = build("bad")
+    assert(Engine.install(b, data, true))
+    assert(read(lib) == data and read(lib .. ".stock") == "\127ELF standard")
+    assert(G_reader_settings.store.start_with == "filemanager")
+    restart()
+    assert(CreDocument.engineInit() == "cre")
+    assert(read(lib) == "\127ELF standard")
+    local state = Engine.getState()
+    assert(state.pending == nil and state.bad.bad)
+    assert(G_reader_settings.store.start_with == "last")
+    local rolled_back = Engine.takeRollback()
+    assert(rolled_back.commit == "bad" and rolled_back.reason:find("undefined symbol", 1, true))
+    assert(Engine.takeRollback() == nil)
+
+    -- A working engine is kept once a book opens with it.
+    b, data = build("good")
+    assert(Engine.install(b, data, true))
+    Engine.verify("good") -- not before a restart
+    assert(Engine.getState().pending)
+    restart()
+    assert(CreDocument.engineInit() == "cre")
+    Engine.verify("good")
+    state = Engine.getState()
+    assert(state.pending == nil and read(lib) == data)
+    assert(G_reader_settings.store.start_with == "last")
+    assert(Engine.hasStock())
+
+    -- A newer build over it keeps the standard copy; KOReader stopping twice
+    -- before a book opened with it puts the standard engine back.
+    b, data = build("crashy")
+    assert(Engine.install(b, data, false))
+    assert(read(lib .. ".stock") == "\127ELF standard")
+    for _i = 1, 2 do
+        restart()
+        assert(CreDocument.engineInit() == "cre")
+        assert(read(lib) == data)
+    end
+    restart()
+    assert(CreDocument.engineInit() == "cre")
+    assert(read(lib) == "\127ELF standard")
+    assert(Engine.getState().bad.crashy)
+
+    -- After a KOReader update (which replaced the library) the guard stands down.
+    b, data = build("other")
+    assert(Engine.install(b, data, true))
+    state = Engine.getState()
+    state.pending.rev = "v2026.06.1"
+    Engine.saveState(state)
+    restart()
+    assert(Engine.getState().pending == nil and not Engine.guard_active)
+    assert(G_reader_settings.store.start_with == "last")
+    -- The standard copy is from another version now.
+    state = Engine.getState()
+    state.stock_rev = "v2026.06.1"
+    Engine.saveState(state)
+    assert(not Engine.hasStock())
+    assert(not Engine.restoreStock())
+
+    os.execute("rm -rf '" .. dir .. "'")
 end
 
 print("plugin tests passed")

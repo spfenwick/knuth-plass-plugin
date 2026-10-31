@@ -15,6 +15,9 @@ after a restart.
 local logger = require("logger")
 local _ = require("gettext")
 local T = require("ffi/util").template
+-- Required while KOReader loads the plugin (its folder is on package.path
+-- only then).
+local Engine = require("knuthplass_engine")
 
 local Updater = {
     repo = "spfenwick/knuth-plass-plugin",
@@ -342,10 +345,11 @@ local function offerUpdate(plugin, manifest, interactive)
     UIManager:show(dialog)
 end
 
---- Check for an update. Interactive checks (from the menu) connect if
--- needed and always report; automatic ones only run when already online
--- and at most once per check_interval, and stay quiet unless there is an
--- update to offer.
+--- Check for updates: the plugin first, then (if the plugin is current)
+-- the engine. Interactive checks (from the menu) connect if needed and
+-- always report; automatic ones only run when already online and at most
+-- once per check_interval, and stay quiet unless there is an update to
+-- offer.
 function Updater.check(plugin, interactive)
     if not plugin.path or not plugin.version then return end
     -- An update is already waiting for a restart.
@@ -368,30 +372,31 @@ function Updater.check(plugin, interactive)
     local function run()
         local progress = interactive and showInfo(_("Checking for updates…"))
         local manifest, err = Updater.fetchManifest()
-        closeWidget(progress)
+        local report = {}
         if not manifest then
             logger.warn("KnuthPlass: update check failed:", err)
-            if interactive then
-                showInfo(T(_("Could not check for updates:\n%1"), err))
-            end
-            return
-        end
-        settings = Updater.getSettings()
-        settings.last_check = os.time()
-        Updater.saveSettings(settings)
-        if not Updater.isNewer(manifest.version, plugin.version) then
-            if interactive then
-                showInfo(T(_("Knuth–Plass justification is up to date (%1)."), plugin.version), 3)
-            end
-            return
-        end
-        if not interactive and settings.skip == manifest.version then
-            return
-        end
-        if not interactive and mode == "install" then
-            Updater.downloadAndInstall(plugin, manifest, true)
+            table.insert(report, T(_("Plugin: could not check (%1)."), tostring(err)))
         else
-            offerUpdate(plugin, manifest, interactive)
+            settings = Updater.getSettings()
+            settings.last_check = os.time()
+            Updater.saveSettings(settings)
+            if Updater.isNewer(manifest.version, plugin.version)
+                    and (interactive or settings.skip ~= manifest.version) then
+                closeWidget(progress)
+                if not interactive and mode == "install" then
+                    Updater.downloadAndInstall(plugin, manifest, true)
+                else
+                    offerUpdate(plugin, manifest, interactive)
+                end
+                -- The engine is checked once the new plugin runs.
+                return
+            end
+            table.insert(report, T(_("Plugin: up to date (%1)."), plugin.version))
+        end
+        local offered = Engine.check(plugin, interactive, mode, Updater.fetch, report)
+        closeWidget(progress)
+        if interactive and not offered then
+            showInfo(table.concat(report, "\n"))
         end
     end
 

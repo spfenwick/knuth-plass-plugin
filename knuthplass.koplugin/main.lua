@@ -20,8 +20,16 @@ local util = require("util")
 local _ = require("gettext")
 local C_ = _.pgettext
 local T = require("ffi/util").template
--- A name of its own: plugins share package.loaded.
+-- Names of their own: plugins share package.loaded.
+local Engine = require("knuthplass_engine")
 local Updater = require("knuthplass_updater")
+
+-- Runs as KOReader loads its plugins: watches a newly installed engine
+-- until a book has opened with it.
+do
+    local ok, err = pcall(Engine.installGuard)
+    if not ok then logger.warn("Knuth–Plass: engine guard:", err) end
+end
 
 -- A Knuth-capable engine fills in a default for this property when a
 -- document view is created; a stock engine returns an empty string.
@@ -460,6 +468,9 @@ end
 -- registered after them) and before the document is first rendered.
 function KnuthPlass:onReadSettings(config)
     self.active = self:engineSupported()
+    if self.ui.rolling then
+        Engine.verify(Engine.installedBuild(self.ui.document))
+    end
     if not self.active then
         if self.ui.rolling then
             logger.info("Knuth–Plass: this CREngine has no Knuth–Plass support; plugin inactive")
@@ -482,6 +493,14 @@ end
 function KnuthPlass:onReaderReady()
     if self.active then
         self:hookProfiles()
+    end
+    local rolled_back = Engine.takeRollback()
+    if rolled_back then
+        local InfoMessage = require("ui/widget/infomessage")
+        UIManager:show(InfoMessage:new{
+            text = T(_("The Knuth–Plass engine %1 was removed and KOReader's standard engine put back, because %2."),
+                rolled_back.commit, rolled_back.reason),
+        })
     end
     -- Once per session, after the book is shown. It returns at once unless
     -- automatic updates are on, a day has passed and the device is online.
@@ -872,6 +891,27 @@ function KnuthPlass:getDialogButtons()
             end,
         },
     })
+    local engine_row = {
+        {
+            text = T(_("Engine: %1"), Engine.buildText(Engine.installedBuild(self.ui.document))),
+            font_size = NAME_FONT_SIZE,
+            font_bold = false,
+            callback = function()
+                self:showEngineInfo()
+            end,
+        },
+    }
+    if Engine.hasStock() then
+        table.insert(engine_row, {
+            text = _("Restore standard engine"),
+            font_size = NAME_FONT_SIZE,
+            font_bold = false,
+            callback = function()
+                self:confirmRestoreStock()
+            end,
+        })
+    end
+    table.insert(rows, engine_row)
     table.insert(rows, {
         {
             text = _("Reset all defaults"),
@@ -884,6 +924,34 @@ function KnuthPlass:getDialogButtons()
         },
     })
     return rows
+end
+
+function KnuthPlass:showEngineInfo()
+    local InfoMessage = require("ui/widget/infomessage")
+    local build = Engine.installedBuild(self.ui.document)
+    local text = T(_("Engine build: %1\nKOReader: %2\nDevice: %3\n\nThe Knuth–Plass engine is a CREngine built from the knuth-plass-history branch of github.com/spfenwick/crengine. \"Check for updates\" also looks for a build for this KOReader version."),
+        Engine.buildText(build), tostring(Engine.revision()), tostring(Engine.target()))
+    if build == "" then
+        text = text .. "\n\n" .. _("This engine has the Knuth–Plass settings but doesn't report its build (an early build).")
+    end
+    UIManager:show(InfoMessage:new{ text = text })
+end
+
+function KnuthPlass:confirmRestoreStock()
+    local ConfirmBox = require("ui/widget/confirmbox")
+    UIManager:show(ConfirmBox:new{
+        text = _("Put back KOReader's standard engine? Knuth–Plass line breaking will be unavailable after KOReader restarts."),
+        ok_text = _("Restore"),
+        ok_callback = function()
+            local ok, err = Engine.restoreStock()
+            if ok then
+                UIManager:askForRestart(_("KOReader's standard engine has been put back. It will be used after KOReader restarts."))
+            else
+                local InfoMessage = require("ui/widget/infomessage")
+                UIManager:show(InfoMessage:new{ text = T(_("Could not restore the standard engine:\n%1"), err) })
+            end
+        end,
+    })
 end
 
 function KnuthPlass:showDialog()
@@ -943,20 +1011,22 @@ function KnuthPlass:addToMainMenu(menu_items)
     menu_items.knuth_plass = {
         text_func = function()
             if not self.active then
-                return _("Knuth–Plass justification (unavailable)")
+                return _("Knuth–Plass justification: install engine…")
             end
             return T(_("Line breaking: %1"),
                 formatValue(options_by_name.line_breaking_mode, self.values.line_breaking_mode))
         end,
         sorting_hint = "typeset",
-        enabled_func = function()
-            return self.active
-        end,
         callback = function(touchmenu_instance)
             if touchmenu_instance then
                 touchmenu_instance:closeMenu()
             end
-            self:showDialog()
+            if self.active then
+                self:showDialog()
+            else
+                -- Offers to install the Knuth–Plass engine.
+                Updater.check(self, true)
+            end
         end,
     }
 end

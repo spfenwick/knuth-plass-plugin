@@ -158,9 +158,10 @@ jobs:
           # The engine must report the commit it was built from.
           strings "$lib" | grep -qx "${{ steps.v.outputs.cre_short }}" \
             || { echo "::error::$lib does not contain the build commit"; exit 1; }
-          file=libkoreader-cre-${{ steps.v.outputs.base_short }}-$TARGET.so.gz
+          # Uncompressed: the device installs it as it is (about 2 MB).
+          file=libkoreader-cre-${{ steps.v.outputs.base_short }}-$TARGET.so
           mkdir -p out
-          gzip -9n -c "$lib" > "out/$file"
+          cp "$lib" "out/$file"
           echo "file=$file" >> "$GITHUB_OUTPUT"
           echo "sha256=$(sha256sum "$lib" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
           echo "size=$(stat -c %s "$lib")" >> "$GITHUB_OUTPUT"
@@ -177,7 +178,6 @@ jobs:
           gh release download "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" -p manifest.json -O old.json 2>/dev/null \
             || echo '{}' > old.json
           url="https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/${{ steps.pkg.outputs.file }}"
-          # sha256 and size are of the uncompressed library, as installed.
           jq --arg repo "$CRENGINE_REPO" --arg ref "${{ steps.v.outputs.ref }}" \
              --arg commit "${{ steps.v.outputs.cre_short }}" \
              --arg base "${{ steps.v.outputs.base }}" --arg ko "${{ steps.v.outputs.koreader }}" --arg t "$TARGET" \
