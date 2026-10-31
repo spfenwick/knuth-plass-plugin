@@ -37,7 +37,8 @@ local CAPABILITY_PROPERTY = "crengine.style.justify.tolerance"
 
 local KnuthPlass = WidgetContainer:extend{
     name = "knuthplass",
-    is_doc_only = true,
+    -- Also in the file browser, for updates (its settings need a book).
+    is_doc_only = false,
 }
 
 local function knuthOnly(self)
@@ -373,10 +374,25 @@ function KnuthPlass:init()
     self.supported = {}
     self.active = false
     self:onDispatcherRegisterActions()
-    -- Only reflowable (CREngine) documents have these settings.
     if self.ui.rolling then
+        -- Only reflowable (CREngine) documents have these settings.
         self.ui.menu:registerToMainMenu(self)
+    elseif not self.ui.document and self.ui.menu then
+        -- The file browser: updates and the engine.
+        self.ui.menu:registerToMainMenu(self)
+        self:scheduleUpdateCheck()
     end
+end
+
+-- Once per session, a little after the file browser or a book is shown.
+-- It returns at once unless automatic updates are on, a day has passed and
+-- the device is online.
+function KnuthPlass:scheduleUpdateCheck()
+    if Updater.scheduled then return end
+    Updater.scheduled = true
+    UIManager:scheduleIn(10, function()
+        Updater.check(self, false)
+    end)
 end
 
 function KnuthPlass:onDispatcherRegisterActions()
@@ -502,14 +518,7 @@ function KnuthPlass:onReaderReady()
                 rolled_back.commit, rolled_back.reason),
         })
     end
-    -- Once per session, after the book is shown. It returns at once unless
-    -- automatic updates are on, a day has passed and the device is online.
-    if not Updater.scheduled then
-        Updater.scheduled = true
-        UIManager:scheduleIn(10, function()
-            Updater.check(self, false)
-        end)
-    end
+    self:scheduleUpdateCheck()
 end
 
 -- Let Profiles' "create from current book settings" include our settings.
@@ -928,11 +937,14 @@ end
 
 function KnuthPlass:showEngineInfo()
     local InfoMessage = require("ui/widget/infomessage")
-    local build = Engine.installedBuild(self.ui.document)
+    -- In the file browser this loads the engine, if it isn't yet.
+    local build, supported = Engine.runningEngine(self.ui.document)
     local text = T(_("Engine build: %1\nKOReader: %2\nDevice: %3\n\nThe Knuth–Plass engine is a CREngine built from the knuth-plass-history branch of github.com/spfenwick/crengine. \"Check for updates\" also looks for a build for this KOReader version."),
         Engine.buildText(build), tostring(Engine.revision()), tostring(Engine.target()))
-    if build == "" then
+    if build == "" and supported then
         text = text .. "\n\n" .. _("This engine has the Knuth–Plass settings but doesn't report its build (an early build).")
+    elseif build == "" then
+        text = text .. "\n\n" .. _("This is KOReader's standard engine, without Knuth–Plass line breaking. \"Check for updates\" offers the Knuth–Plass engine when there's a build for this device.")
     end
     UIManager:show(InfoMessage:new{ text = text })
 end
@@ -1008,6 +1020,10 @@ function KnuthPlass:onShowKnuthPlassDialog()
 end
 
 function KnuthPlass:addToMainMenu(menu_items)
+    if not self.ui.document then
+        menu_items.knuth_plass = self:fileBrowserMenu()
+        return
+    end
     menu_items.knuth_plass = {
         text_func = function()
             if not self.active then
@@ -1028,6 +1044,58 @@ function KnuthPlass:addToMainMenu(menu_items)
                 Updater.check(self, true)
             end
         end,
+    }
+end
+
+-- The file browser's entry (Tools): updates and the engine.
+function KnuthPlass:fileBrowserMenu()
+    local modes = {}
+    for _i, mode in ipairs(Updater.modes) do
+        table.insert(modes, {
+            text = Updater.modeText(mode),
+            checked_func = function()
+                return Updater.getMode() == mode
+            end,
+            radio = true,
+            callback = function()
+                Updater.setMode(mode)
+            end,
+        })
+    end
+    return {
+        text = _("Knuth–Plass justification"),
+        sorting_hint = "tools",
+        sub_item_table = {
+            {
+                text = T(_("Check for updates (%1)"), self.version or "?"),
+                enabled_func = function() return self.path ~= nil end,
+                callback = function()
+                    Updater.check(self, true)
+                end,
+            },
+            {
+                text_func = function()
+                    return T(_("Automatic updates: %1"), Updater.modeText(Updater.getMode()))
+                end,
+                help_text = _("When KOReader is online, the plugin checks for a new version once a day.\n\noff: never\nnotify: ask before installing\ninstall: install it, ready for the next restart\n\nThe engine is checked automatically when a book is open."),
+                sub_item_table = modes,
+                separator = true,
+            },
+            {
+                text = _("Engine information"),
+                keep_menu_open = true,
+                callback = function()
+                    self:showEngineInfo()
+                end,
+            },
+            {
+                text = _("Restore standard engine"),
+                enabled_func = function() return Engine.hasStock() end,
+                callback = function()
+                    self:confirmRestoreStock()
+                end,
+            },
+        },
     }
 end
 

@@ -314,7 +314,8 @@ function Updater.downloadAndInstall(plugin, manifest, quiet)
         return false
     end
     logger.info("KnuthPlass: updated to", manifest.version)
-    plugin.installed_update = manifest.version
+    -- For the rest of this session (any plugin instance).
+    Updater.installed = manifest.version
     UIManager:askForRestart(T(_("Knuth–Plass justification has been updated to %1. It will be used after KOReader restarts."), manifest.version))
     return true
 end
@@ -353,9 +354,9 @@ end
 function Updater.check(plugin, interactive)
     if not plugin.path or not plugin.version then return end
     -- An update is already waiting for a restart.
-    if plugin.installed_update then
+    if Updater.installed then
         if interactive then
-            showInfo(T(_("Knuth–Plass justification %1 is installed and will be used after KOReader restarts."), plugin.installed_update))
+            showInfo(T(_("Knuth–Plass justification %1 is installed and will be used after KOReader restarts."), Updater.installed))
         end
         return
     end

@@ -681,4 +681,33 @@ do
     os.execute("rm -rf '" .. dir .. "'")
 end
 
+-- The file browser: an entry under Tools for updates and the engine.
+do
+    local Updater = require("knuthplass_updater")
+    G_reader_settings = settings()
+    scheduled = {}
+    Updater.scheduled = nil
+    local registered = false
+    local fm_ui = { menu = { registerToMainMenu = function() registered = true end } }
+    local plugin = Plugin:new{ ui = fm_ui, version = "0.2.1", path = "/plugins/knuthplass.koplugin" }
+    assert(registered)
+    assert(#scheduled == 1) -- the automatic check
+    local menu_items = {}
+    plugin:addToMainMenu(menu_items)
+    local entry = menu_items.knuth_plass
+    assert(entry.sorting_hint == "tools" and entry.text == "Knuth–Plass justification")
+    local items = entry.sub_item_table
+    assert(items[1].text == "Check for updates (0.2.1)" and items[1].enabled_func())
+    assert(items[2].text_func() == "Automatic updates: notify")
+    local modes = items[2].sub_item_table
+    assert(#modes == 3 and modes[2].checked_func() and not modes[3].checked_func())
+    modes[3].callback()
+    assert(items[2].text_func() == "Automatic updates: install" and modes[3].checked_func())
+    assert(items[4].text == "Restore standard engine" and not items[4].enabled_func())
+    -- A PDF in the reader: no entry.
+    registered = false
+    Plugin:new{ ui = { document = {}, menu = { registerToMainMenu = function() registered = true end } } }
+    assert(not registered)
+end
+
 print("plugin tests passed")

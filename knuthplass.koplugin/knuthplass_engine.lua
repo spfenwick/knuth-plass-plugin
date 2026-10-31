@@ -30,6 +30,8 @@ local Engine = {
     base_api_url = "https://api.github.com/repos/koreader/koreader/contents/base?ref=%1",
     settings_key = "knuthplass_engine",
     build_property = "crengine.knuth.plass.build",
+    -- A Knuth–Plass engine fills in a default for this property.
+    capability_property = "crengine.style.justify.tolerance",
     max_manifest_size = 256 * 1024,
     max_lib_size = 16 * 1024 * 1024,
     -- Engine starts allowed before a book has opened with a new engine.
@@ -97,6 +99,43 @@ function Engine.installedBuild(document)
     if not cre or not cre.getStringProperty then return nil end
     local ok, value = pcall(cre.getStringProperty, cre, Engine.build_property)
     return ok and value or ""
+end
+
+--- The running engine: its build ("" if it doesn't report one), and
+-- whether it has the Knuth–Plass settings. Read from the open book, or
+-- with no book open (in the file browser), from an empty document view,
+-- which loads the engine if it isn't yet.
+-- @return build, supported; or nil if it can't be read
+function Engine.runningEngine(document)
+    local cre_doc = document and document._document
+    local view
+    if not cre_doc then
+        local ok, cre = pcall(function()
+            return require("document/credocument"):engineInit()
+        end)
+        if not ok or type(cre) ~= "table" or not cre.newDocView then
+            logger.warn("KnuthPlass: cannot load the engine:", cre)
+            return nil
+        end
+        -- A document view gets the engine's defaults as it's made.
+        ok, view = pcall(cre.newDocView, 100, 100, 0)
+        if not ok then
+            logger.warn("KnuthPlass: cannot make a document view:", view)
+            return nil
+        end
+        cre_doc = view
+    end
+    if not cre_doc.getStringProperty then return nil end
+    local function property(name)
+        local ok, value = pcall(cre_doc.getStringProperty, cre_doc, name)
+        return ok and value or ""
+    end
+    local build = property(Engine.build_property)
+    local supported = property(Engine.capability_property) ~= ""
+    if view and view.close then
+        pcall(view.close, view)
+    end
+    return build, supported
 end
 
 -- Network ---------------------------------------------------------------------
@@ -509,7 +548,7 @@ function Engine.buildText(build)
     return build
 end
 
-function Engine.downloadAndInstall(plugin, build, current_build, fetch, quiet)
+function Engine.downloadAndInstall(build, current_build, supported, fetch, quiet)
     local UIManager = require("ui/uimanager")
     local progress = not quiet and showInfo(T(_("Downloading the Knuth–Plass engine %1…"), build.commit))
     local data, err = fetch(build.url, Engine.max_lib_size)
@@ -529,7 +568,7 @@ function Engine.downloadAndInstall(plugin, build, current_build, fetch, quiet)
     end
     if ok then
         -- An engine without the Knuth–Plass settings is KOReader's own.
-        ok, err = Engine.install(build, data, current_build == "" and not plugin.active)
+        ok, err = Engine.install(build, data, current_build == "" and not supported)
     end
     closeWidget(progress)
     if not ok then
@@ -539,16 +578,18 @@ function Engine.downloadAndInstall(plugin, build, current_build, fetch, quiet)
         end
         return false
     end
-    plugin.installed_engine = build.commit
+    -- For the rest of this session (the file browser and the reader each
+    -- have their own plugin instance).
+    Engine.installed = build.commit
     UIManager:askForRestart(T(_("The Knuth–Plass engine %1 has been installed. It will be used after KOReader restarts.\n\nUntil a book has opened with it, KOReader starts in the file browser, and if it fails the standard engine is put back."), build.commit))
     return true
 end
 
-local function offerInstall(plugin, build, exact, current_build, fetch, interactive)
+local function offerInstall(build, exact, current_build, supported, fetch, interactive)
     local ConfirmBox = require("ui/widget/confirmbox")
     local UIManager = require("ui/uimanager")
     local text
-    if current_build == "" and not plugin.active then
+    if current_build == "" and not supported then
         text = T(_("This KOReader's engine has no Knuth–Plass line breaking. Install the Knuth–Plass engine %1?"), build.commit)
     else
         text = T(_("Knuth–Plass engine %1 is available (installed: %2)."), build.commit, Engine.buildText(current_build))
@@ -562,7 +603,7 @@ local function offerInstall(plugin, build, exact, current_build, fetch, interact
         ok_text = _("Install"),
         cancel_text = _("Later"),
         ok_callback = function()
-            Engine.downloadAndInstall(plugin, build, current_build, fetch)
+            Engine.downloadAndInstall(build, current_build, supported, fetch)
         end,
         other_buttons = not interactive and {{
             {
@@ -583,12 +624,19 @@ end
 -- Appends status lines to report (for interactive checks).
 -- @return true if it offered or installed an update
 function Engine.check(plugin, interactive, mode, fetch, report)
-    if plugin.installed_engine then
-        table.insert(report, T(_("Engine: %1 is installed and will be used after KOReader restarts."), plugin.installed_engine))
+    if Engine.installed then
+        table.insert(report, T(_("Engine: %1 is installed and will be used after KOReader restarts."), Engine.installed))
         return false
     end
-    local current_build = Engine.installedBuild(plugin.ui and plugin.ui.document)
-    if current_build == nil then return false end
+    local document = plugin.ui and plugin.ui.document
+    -- Automatic checks don't load the engine just to look (in the file
+    -- browser); they check it when a book is open.
+    if not document and not interactive then return false end
+    local current_build, supported = Engine.runningEngine(document)
+    if current_build == nil then
+        table.insert(report, _("Engine: cannot read which engine is running."))
+        return false
+    end
     -- Which devices have builds is up to the manifest.
     local target = Engine.target()
     if not target then
@@ -626,9 +674,9 @@ function Engine.check(plugin, interactive, mode, fetch, report)
         return false
     end
     if not interactive and mode == "install" then
-        return Engine.downloadAndInstall(plugin, build, current_build, fetch, true)
+        return Engine.downloadAndInstall(build, current_build, supported, fetch, true)
     end
-    offerInstall(plugin, build, exact, current_build, fetch, interactive)
+    offerInstall(build, exact, current_build, supported, fetch, interactive)
     return true
 end
 

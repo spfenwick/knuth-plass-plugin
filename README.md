@@ -124,9 +124,11 @@ too.
 
 ## Updates
 
-The dialog's "Check for updates" row looks for a newer release of the
-plugin on GitHub. "Automatic updates" (tap to change, long-press for help)
-sets what happens once a day when KOReader is already online:
+Updates are in the file browser's Tools menu → "Knuth–Plass justification",
+so no book needs to be open, and in the bottom rows of the dialog.
+"Check for updates" looks for a newer release of the plugin on GitHub.
+"Automatic updates" sets what happens once a day when KOReader is already
+online:
 
 - off: nothing
 - notify (the default): asks before installing
@@ -138,7 +140,8 @@ complete and its checksum matches, and it takes effect after a restart.
 Once the plugin is up to date, the check also looks for a Knuth–Plass
 engine build for this device and KOReader version, and installs it the same
 way. Builds are made for KOReader's `kobo`, `kindlepw2` and `kindlehf`
-packages; tap the dialog's "Engine" row to see which one a device uses.
+packages; "Engine information" (or the dialog's "Engine" row) shows which
+one a device uses.
 (A Kindle Voyage uses `kindlepw2`; a Paperwhite 11 on firmware 5.16.3 or
 later uses `kindlehf`.)
 
@@ -155,7 +158,7 @@ later uses `kindlehf`.)
   KOReader) and checks it has every function of the running engine. A build
   that fails isn't offered again for this KOReader version.
 - KOReader's own engine is kept as `libs/libkoreader-cre.so.stock`, and the
-  dialog's "Restore standard engine" puts it back.
+  "Restore standard engine" (Tools menu or dialog) puts it back.
 - Until a book has opened with a new engine, KOReader starts in the file
   browser (so the plugin loads before the engine). If the engine fails to
   load, or KOReader stops twice before a book opened with it, the standard
