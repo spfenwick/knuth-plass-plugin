@@ -241,7 +241,18 @@ local function readFile(path)
     return data
 end
 
+local ffi = require("ffi")
+pcall(ffi.cdef, "int chmod(const char *path, unsigned int mode);")
+
+--- Make a library read-only (Android 14 wants loaded code to be; harmless
+-- elsewhere).
+local function readOnly(path)
+    pcall(function() return ffi.C.chmod(path, 292) end) -- 0444
+end
+
+--- Write a new file at path (replacing any, even read-only).
 local function writeFile(path, data)
+    os.remove(path)
     local file, err = io.open(path, "wb")
     if not file then return nil, err end
     local ok, write_err = file:write(data)
@@ -255,10 +266,11 @@ end
 
 --- Put data at path by writing a temporary file and renaming it over path
 -- (a running KOReader keeps the old library it has loaded).
-local function replaceFile(path, data)
+local function replaceFile(path, data, read_only)
     local tmp = path .. ".new"
     local ok, err = writeFile(tmp, data)
     if not ok then return nil, err end
+    if read_only then readOnly(tmp) end
     ok, err = os.rename(tmp, path)
     if not ok then
         os.remove(tmp)
@@ -345,7 +357,7 @@ function Engine.migrate(plugin_path)
         -- libs/libkoreader-cre.so is the Knuth–Plass engine.
         local knuth = readFile(lib)
         require("util").makePath(Loader.dir())
-        if knuth and replaceFile(Loader.libPath(), knuth) then
+        if knuth and replaceFile(Loader.libPath(), knuth, true) then
             Loader.writeState({
                 enabled = true,
                 lib = Loader.libPath(),
@@ -526,6 +538,7 @@ local function keepGood(state, id)
         local data = readFile(state.lib)
         local copy = Loader.goodPath() .. ".new"
         if data and writeFile(copy, data) then
+            readOnly(copy)
             return { lib = Loader.goodPath(), commit = state.commit, id = state.id, rev = state.rev }, copy
         end
     end
@@ -547,7 +560,7 @@ function Engine.install(build, data, plugin_path)
     require("util").makePath(Loader.dir())
     local good, copy = keepGood(Loader.readState(), Engine.buildId(build))
     if readFile(Loader.libPath()) ~= data then
-        ok, err = replaceFile(Loader.libPath(), data)
+        ok, err = replaceFile(Loader.libPath(), data, true)
         if not ok then
             if copy then os.remove(copy) end
             return nil, err

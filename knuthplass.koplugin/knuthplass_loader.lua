@@ -1,7 +1,9 @@
 --[[--
 Makes KOReader load the Knuth–Plass CREngine from the plugin's own folder
 (<KOReader data folder>/knuthplass/libkoreader-cre.so) instead of its own
-libs/libkoreader-cre.so, which is never changed.
+libs/libkoreader-cre.so, which is never changed. (On Android, the engine is
+in KOReader's library libkoreader-monolibtic.so, and the plugin's folder is
+in the app's private storage: see Loader.dir.)
 
 KOReader loads its engine with require("libs/libkoreader-cre"), so this sets
 package.preload for that name. It has to run before the engine is first
@@ -45,8 +47,21 @@ local function dataDir()
     return dir
 end
 
+local function android()
+    local ok, module = pcall(require, "android")
+    return ok and type(module) == "table" and module.dir and module or nil
+end
+
 --- The plugin's folder for the engine.
 function Loader.dir()
+    local A = android()
+    if A then
+        -- Android loads libraries only from the app's private storage, not
+        -- from KOReader's data folder (shared storage); and the launcher
+        -- empties its own folder there (android.dir) when KOReader is
+        -- updated. So next to that: /data/user/0/<app>/knuthplass.
+        return A.dir:match("^(.*)/[^/]+$") .. "/knuthplass"
+    end
     return dataDir() .. "/knuthplass"
 end
 
@@ -63,8 +78,18 @@ function Loader.goodPath()
     return Loader.dir() .. "/libkoreader-cre.good.so"
 end
 
---- KOReader's own engine.
+--- KOReader's own engine (a library with luaopen_cre).
 function Loader.standardLibPath()
+    local A = android()
+    if A and A.nativeLibraryDir then
+        local monolibtic = A.nativeLibraryDir .. "/libkoreader-monolibtic.so"
+        local file = io.open(monolibtic, "rb")
+        if file then
+            file:close()
+            return monolibtic
+        end
+        return A.nativeLibraryDir .. "/libkoreader-cre.so"
+    end
     local lfs = require("libs/libkoreader-lfs")
     return lfs.currentdir() .. "/libs/libkoreader-cre.so"
 end

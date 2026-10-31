@@ -1019,4 +1019,24 @@ do
     package.loaded.device = saved
 end
 
+-- Android: the engine in the app's private storage (not the data folder,
+-- nor the launcher's own folder, which updates empty), and KOReader's own
+-- in its monolibtic library.
+do
+    local Loader = require("knuthplass_loader")
+    local native = os.tmpname()
+    os.remove(native)
+    assert(os.execute("mkdir -p '" .. native .. "'"))
+    package.loaded.android = { dir = "/data/user/0/org.koreader.launcher/files", nativeLibraryDir = native }
+    assert(Loader.dir() == "/data/user/0/org.koreader.launcher/knuthplass")
+    assert(Loader.libPath() == "/data/user/0/org.koreader.launcher/knuthplass/libkoreader-cre.so")
+    assert(Loader.standardLibPath() == native .. "/libkoreader-cre.so") -- (no monolibtic library)
+    local f = assert(io.open(native .. "/libkoreader-monolibtic.so", "wb")); f:close()
+    assert(Loader.standardLibPath() == native .. "/libkoreader-monolibtic.so")
+    package.loaded.android = nil
+    os.remove(native .. "/libkoreader-monolibtic.so")
+    os.remove(native)
+    assert(Loader.dir():sub(-11) == "/knuthplass" and not Loader.dir():find("org.koreader"))
+end
+
 print("plugin tests passed")

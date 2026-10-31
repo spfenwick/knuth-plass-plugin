@@ -19,6 +19,13 @@
 # and linux-<arch> for KOReader's Linux build (make target "linux"), which
 # its .deb, tarball and AppImage all package.
 #
+# KOReader's Android build links everything into one library
+# (libkoreader-monolibtic.so), so there's no separate engine library to
+# replace, nor libraries for one to use. For "standalone" targets, the engine
+# is built with crengine, its libraries and the C++ runtime linked in and
+# hidden (.github/scripts/standalone-cre.sh): it exports only luaopen_cre
+# and needs only the system libraries and libluajit.so.
+#
 # The library only has to agree with the rest of KOReader where they meet:
 # cre.cpp (the Lua API KOReader's frontend calls), its build options, and
 # the shared libraries it links (of which only lunasvg, a C++ library
@@ -77,7 +84,8 @@ env:
       {"name": "kindlepw2", "target": "kindlepw2", "image": "koreader/kokindle:latest"},
       {"name": "kindlehf", "target": "kindlehf", "image": "koreader/kokindle:latest"},
       {"name": "remarkable", "target": "remarkable", "image": "koreader/koremarkable:latest"},
-      {"name": "linux-x86_64", "target": "linux", "image": "koreader/koappimage:5.0.0-22.04"}
+      {"name": "linux-x86_64", "target": "linux", "image": "koreader/koappimage:5.0.0-22.04"},
+      {"name": "android-arm64", "target": "android-arm64", "image": "koreader/koandroid:5.0.0-22.04", "standalone": true}
     ]
 
 jobs:
@@ -186,6 +194,7 @@ jobs:
     env:
       NAME: ${{ matrix.name }}
       TARGET: ${{ matrix.target }}
+      STANDALONE: ${{ matrix.standalone || false }}
       IMAGE: ${{ matrix.image }}
       FP: ${{ needs.plan.outputs.fp }}
       BASE: ${{ needs.plan.outputs.base }}
@@ -240,6 +249,18 @@ jobs:
           git -C "$dir" checkout --force --detach "$CRE"
           git -C "$dir" log --oneline -1
 
+      # The plugin's build scripts.
+      - name: Check out build scripts
+        if: matrix.standalone
+        uses: actions/checkout@v4
+        with:
+          path: plugin
+          sparse-checkout: .github/scripts
+
+      - name: Make the engine standalone
+        if: matrix.standalone
+        run: cd base && sh ../plugin/.github/scripts/standalone-cre.sh
+
       - name: Build
         run: |
           set -euo pipefail
@@ -290,7 +311,21 @@ jobs:
           # The engine must report the commit it was built from.
           strings "$lib" | grep -qx "$CRE_SHORT" \
             || { echo "::error::$lib does not contain the build commit"; exit 1; }
-          # Uncompressed: the device installs it as it is (about 2 MB).
+          if [ "$STANDALONE" = true ]; then
+            # Only the system libraries and libluajit.so…
+            needed=$(readelf -d "$lib" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' | sort | tr '\n' ' ')
+            echo "needs: $needed"
+            for n in $needed; do
+              case $n in libc.so|libm.so|libdl.so|liblog.so|libluajit.so) ;;
+                *) echo "::error::$lib needs $n"; exit 1 ;;
+              esac
+            done
+            # …and only luaopen_cre exported.
+            exported=$(nm -D --defined-only "$lib" | awk '{print $3}' | tr '\n' ' ')
+            echo "exports: $exported"
+            [ "$exported" = "luaopen_cre " ] || { echo "::error::$lib exports more than luaopen_cre"; exit 1; }
+          fi
+          # Uncompressed: the device installs it as it is (2–7 MB).
           file=libkoreader-cre-$FP-$NAME.so
           mkdir -p out
           cp "$lib" "out/$file"
