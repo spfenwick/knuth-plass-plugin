@@ -270,7 +270,7 @@ jobs:
           KEEP: tree/${{ matrix.target }}/${{ needs.plan.outputs.base }}/${{ needs.plan.outputs.cre }}
         run: |
           gh cache list -R "$GITHUB_REPOSITORY" --key "tree/$TARGET/" --limit 100 --json key --jq '.[].key' \
-            | grep -vx "$KEEP" | while read -r key; do
+            | { grep -vx "$KEEP" || true; } | while read -r key; do
                 gh cache delete -R "$GITHUB_REPOSITORY" "$key" || true
               done
 
@@ -352,10 +352,11 @@ jobs:
           done
           cat manifest.json
           gh release upload "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --clobber manifest.json
-          # Remove libraries the manifest no longer lists.
+          # Remove libraries the manifest no longer lists. (grep exits 1 when
+          # nothing is left to remove, which isn't an error here.)
           gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' \
-            | grep '^libkoreader-cre-' \
-            | grep -vxF -f <(jq -r '.builds[][].file' manifest.json) \
+            | { grep '^libkoreader-cre-' || true; } \
+            | { grep -vxF -f <(jq -r '.builds[][].file' manifest.json) || true; } \
             | while read -r name; do
                 gh release delete-asset "$RELEASE_TAG" "$name" -R "$GITHUB_REPOSITORY" -y || true
               done
