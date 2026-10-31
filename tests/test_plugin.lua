@@ -460,4 +460,11 @@ do
     assert(equals(profile.ragged_text, { 15, 200 }))
 end
 
+do
+    -- The release workflow and the updater read the version from _meta.lua.
+    stub("gettext", function(s) return s end)
+    local meta = dofile("knuthplass.koplugin/_meta.lua")
+    assert(type(meta.version) == "string" and meta.version:match("^%d+%.%d+%.%d+$"), tostring(meta.version))
+end
+
 print("plugin tests passed")

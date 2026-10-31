@@ -1,0 +1,194 @@
+# Builds KOReader's CREngine library (libkoreader-cre.so) from the
+# knuth-plass-history branch of spfenwick/crengine, against the
+# koreader-base of the latest KOReader nightly, and publishes it on the
+# rolling "engine" release with a manifest.json the plugin's updater reads:
+#
+#   https://github.com/<repo>/releases/download/engine/manifest.json
+#
+#   { "crengine": {"repo": "...", "ref": "...", "commit": "<12 hex>"},
+#     "builds": { "<koreader-base commit>": { "<target>": {
+#         "file": "...", "url": "...", "sha256": "...", "size": n,
+#         "commit": "<12 hex>", "koreader": "<nightly it was built for>",
+#         "built": "<ISO time>" } } } }
+#
+# The library only has to match koreader-base, so builds are keyed by its
+# commit: one build serves every nightly with that base. A device finds its
+# base from the commit in its version (v2026.07.2-299-g8012773_… → 8012773)
+# through the GitHub API (repos/koreader/koreader/contents/base?ref=…).
+name: Build engine
+
+on:
+  workflow_dispatch:
+    inputs:
+      koreader_ref:
+        description: KOReader commit, tag or branch (empty for the latest nightly)
+        required: false
+      crengine_ref:
+        description: spfenwick/crengine branch, tag or commit
+        required: false
+        default: knuth-plass-history
+      force:
+        description: Rebuild even if this build is already published
+        type: boolean
+        default: false
+  # Sent by spfenwick/crengine on a push to knuth-plass-history.
+  repository_dispatch:
+    types: [crengine-updated]
+  # Picks up nightlies with a new koreader-base (otherwise it stops early).
+  schedule:
+    - cron: "17 4 * * *"
+
+permissions:
+  contents: write
+
+# Runs share the "engine" release and its manifest.
+concurrency:
+  group: engine-release
+  cancel-in-progress: false
+
+env:
+  CRENGINE_REPO: spfenwick/crengine
+  RELEASE_TAG: engine
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  kobo:
+    runs-on: ubuntu-latest
+    env:
+      TARGET: kobo
+      IMAGE: koreader/kokobo:latest
+    steps:
+      - name: Resolve versions
+        id: v
+        env:
+          IN_KOREADER: ${{ inputs.koreader_ref }}
+          IN_REF: ${{ inputs.crengine_ref || github.event.client_payload.ref || 'knuth-plass-history' }}
+        run: |
+          set -euo pipefail
+          if [ -n "$IN_KOREADER" ]; then
+            ko_ref=$IN_KOREADER
+            ko_version=$IN_KOREADER
+          else
+            # The nightly KOReader's own updater would install.
+            zsync="https://ota.koreader.rocks/koreader-$TARGET-latest-nightly.zsync"
+            curl -fsSL --max-time 120 -o nightly.zsync "$zsync"
+            name=$(sed -n '1,20{s/^Filename: //p}' nightly.zsync | head -1 | tr -d '\r')
+            ko_version=${name#koreader-"$TARGET"-}
+            ko_version=${ko_version%.targz}
+            [[ $ko_version =~ -g([0-9a-f]{7,40})_ ]] || { echo "::error::no commit in nightly name: $name"; exit 1; }
+            ko_ref=${BASH_REMATCH[1]}
+          fi
+          [[ $ko_ref =~ ^[0-9A-Za-z._/-]+$ ]] || { echo "::error::bad KOReader ref: $ko_ref"; exit 1; }
+          ref=$IN_REF
+          cre=$(gh api "repos/$CRENGINE_REPO/commits/$ref" --jq .sha)
+          base=$(gh api "repos/koreader/koreader/contents/base?ref=$ko_ref" --jq .sha)
+          echo "Building $TARGET: KOReader $ko_version (base $base), crengine $ref @ $cre"
+          {
+            echo "koreader=$ko_version"
+            echo "base=$base"
+            echo "base_short=${base:0:12}"
+            echo "ref=$ref"
+            echo "cre=$cre"
+            echo "cre_short=${cre:0:12}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Skip if already published
+        id: skip
+        env:
+          FORCE: ${{ inputs.force || false }}
+        run: |
+          set -euo pipefail
+          published=$(gh release download "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" \
+              -p manifest.json -O - 2>/dev/null \
+            | jq -r --arg base "${{ steps.v.outputs.base }}" --arg t "$TARGET" \
+              '.builds[$base][$t].commit // ""' || true)
+          if [ "$published" = "${{ steps.v.outputs.cre_short }}" ] && [ "$FORCE" != "true" ]; then
+            echo "Already published."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out koreader-base
+        if: steps.skip.outputs.skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: koreader/koreader-base
+          ref: ${{ steps.v.outputs.base }}
+          path: base
+
+      # In place of base's crengine submodule (the only one it has). A git
+      # checkout, so the engine's CMake can read the commit too.
+      - name: Check out the Knuth–Plass crengine
+        if: steps.skip.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          dir=base/thirdparty/kpvcrlib/crengine
+          rm -rf "$dir"
+          git clone --filter=blob:none --no-checkout "https://github.com/$CRENGINE_REPO" "$dir"
+          git -C "$dir" checkout --detach "${{ steps.v.outputs.cre }}"
+
+      - name: Restore build cache
+        if: steps.skip.outputs.skip != 'true'
+        uses: actions/cache@v4
+        with:
+          path: ccache
+          key: ccache-${{ env.TARGET }}-${{ steps.v.outputs.base }}-${{ steps.v.outputs.cre }}
+          restore-keys: |
+            ccache-${{ env.TARGET }}-${{ steps.v.outputs.base }}-
+            ccache-${{ env.TARGET }}-
+
+      - name: Build
+        if: steps.skip.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p ccache
+          # The image's user (ko) has the runner's uid, so it can write the
+          # checkout. A login shell puts the toolchain on PATH.
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/home/ko/ws" -w /home/ko/ws/base \
+            -e CCACHE_DIR=/home/ko/ws/ccache -e CCACHE_MAXSIZE=2G \
+            -e KNUTH_PLASS_BUILD="${{ steps.v.outputs.cre_short }}" \
+            "$IMAGE" bash -lc "make TARGET=$TARGET -j$(nproc)"
+
+      - name: Package
+        if: steps.skip.outputs.skip != 'true'
+        id: pkg
+        run: |
+          set -euo pipefail
+          lib=$(ls base/build/*/libs/libkoreader-cre.so)
+          # The engine must report the commit it was built from.
+          strings "$lib" | grep -qx "${{ steps.v.outputs.cre_short }}" \
+            || { echo "::error::$lib does not contain the build commit"; exit 1; }
+          file=libkoreader-cre-${{ steps.v.outputs.base_short }}-$TARGET.so.gz
+          mkdir -p out
+          gzip -9n -c "$lib" > "out/$file"
+          echo "file=$file" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(sha256sum "$lib" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "size=$(stat -c %s "$lib")" >> "$GITHUB_OUTPUT"
+
+      - name: Publish
+        if: steps.skip.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          if ! gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --prerelease \
+              --title "Knuth–Plass engine builds" \
+              --notes "CREngine builds for the plugin's updater. See manifest.json."
+          fi
+          gh release download "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" -p manifest.json -O old.json 2>/dev/null \
+            || echo '{}' > old.json
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/${{ steps.pkg.outputs.file }}"
+          # sha256 and size are of the uncompressed library, as installed.
+          jq --arg repo "$CRENGINE_REPO" --arg ref "${{ steps.v.outputs.ref }}" \
+             --arg commit "${{ steps.v.outputs.cre_short }}" \
+             --arg base "${{ steps.v.outputs.base }}" --arg ko "${{ steps.v.outputs.koreader }}" --arg t "$TARGET" \
+             --arg file "${{ steps.pkg.outputs.file }}" --arg url "$url" \
+             --arg sha "${{ steps.pkg.outputs.sha256 }}" --argjson size "${{ steps.pkg.outputs.size }}" \
+             --arg built "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+             '.crengine = {repo: $repo, ref: $ref, commit: $commit}
+              | .builds[$base][$t] = {file: $file, url: $url, sha256: $sha, size: $size,
+                                      commit: $commit, koreader: $ko, built: $built}' \
+             old.json > out/manifest.json
+          cat out/manifest.json
+          # The library first, so the manifest never points at a missing file.
+          gh release upload "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --clobber "out/${{ steps.pkg.outputs.file }}"
+          gh release upload "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --clobber out/manifest.json
