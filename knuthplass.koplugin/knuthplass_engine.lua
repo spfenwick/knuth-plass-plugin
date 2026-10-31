@@ -390,6 +390,7 @@ function Engine.restoreStock()
     local ok, err = Loader.writeState(state)
     if not ok then return nil, err end
     os.remove(Loader.libPath())
+    os.remove(Loader.goodPath())
     Engine.removePatch()
     logger.info("KnuthPlass: back to KOReader's engine")
     return true
@@ -421,20 +422,72 @@ function Engine.verify(build)
     end
 end
 
---- A failed engine to tell the user about (once): { commit, reason }.
+local function markBad(ids)
+    local settings = Engine.getState()
+    settings.bad = settings.bad or {}
+    for _i, id in ipairs(ids) do
+        settings.bad[badKey(id)] = true
+    end
+    Engine.saveState(settings)
+end
+
+--- A failed engine to tell the user about (once): { commit, reason,
+-- fallback = the commit of the previous engine used instead, if any }.
 function Engine.takeRollback()
     local state = Loader.readState()
     if not state or not state.failed then return nil end
-    local rolled_back = { commit = state.commit or "?", reason = state.failed }
-    if state.id then
-        local settings = Engine.getState()
-        settings.bad = settings.bad or {}
-        settings.bad[badKey(state.id)] = true
-        Engine.saveState(settings)
+    local rolled_back = { reason = state.failed }
+    -- Not offered again for this KOReader version.
+    local bad = { state.failed_id }
+    if state.enabled then
+        -- Replaced by the previous engine.
+        rolled_back.commit = state.failed_commit or "?"
+        rolled_back.fallback = state.commit or "?"
+    else
+        rolled_back.commit = state.commit or "?"
+        table.insert(bad, state.id)
     end
+    markBad(bad)
     state.failed = nil
+    state.failed_commit = nil
+    state.failed_id = nil
     Loader.writeState(state)
     return rolled_back
+end
+
+--- The previous engine kept to go back to ({ lib, commit, id, rev }), if
+-- the installed one is in use.
+function Engine.previous()
+    local state = Engine.installed()
+    local good = state and state.good
+    if type(good) == "table" and type(good.lib) == "string" and readFile(good.lib) ~= nil then
+        return good
+    end
+    return nil
+end
+
+--- Go back to the previous engine (from the next start). The installed
+-- one isn't offered again for this KOReader version.
+-- @return true, or nil and an error message
+function Engine.rollBack()
+    local state = Engine.installed()
+    local good = Engine.previous()
+    if not good then return nil, _("there's no previous engine") end
+    -- (Renaming over the library KOReader has loaded leaves that in place.)
+    local ok, err = os.rename(good.lib, Loader.libPath())
+    if not ok then return nil, err end
+    local bad_id = state.id
+    ok, err = Loader.writeState({
+        enabled = true,
+        lib = Loader.libPath(),
+        commit = good.commit,
+        id = good.id,
+        rev = good.rev,
+    })
+    if not ok then return nil, err end
+    if bad_id then markBad({ bad_id }) end
+    logger.info("KnuthPlass: rolled back from", state.commit, "to", good.commit)
+    return true
 end
 
 -- Installing ------------------------------------------------------------------
@@ -462,16 +515,43 @@ function Engine.existingLibrary(build)
     return nil
 end
 
+--- The engine to go back to if the one replacing the installed one fails:
+-- the installed one, if a book has opened with it (copied to a temporary
+-- file, which takes the place of the old copy once the new engine is
+-- installed); otherwise the one kept before.
+-- @return it, and the temporary copy if there is one
+local function keepGood(state, id)
+    if not state or not state.enabled then return nil end
+    if not state.pending and not state.failed and state.id ~= id and type(state.lib) == "string" then
+        local data = readFile(state.lib)
+        local copy = Loader.goodPath() .. ".new"
+        if data and writeFile(copy, data) then
+            return { lib = Loader.goodPath(), commit = state.commit, id = state.id, rev = state.rev }, copy
+        end
+    end
+    local good = state.good
+    if type(good) == "table" and good.id ~= id and good.lib == Loader.goodPath()
+            and readFile(good.lib) ~= nil then
+        return good
+    end
+    return nil
+end
+
 --- Install build (data is the library) in the plugin's folder, for this
--- KOReader version, from the next start.
+-- KOReader version, from the next start. The engine it replaces is kept,
+-- if a book has opened with it (see keepGood).
 -- @return true, or nil and an error message
 function Engine.install(build, data, plugin_path)
     local ok, err = Engine.verifyDownload(build, data)
     if not ok then return nil, err end
     require("util").makePath(Loader.dir())
+    local good, copy = keepGood(Loader.readState(), Engine.buildId(build))
     if readFile(Loader.libPath()) ~= data then
         ok, err = replaceFile(Loader.libPath(), data)
-        if not ok then return nil, err end
+        if not ok then
+            if copy then os.remove(copy) end
+            return nil, err
+        end
     end
     ok, err = Loader.writeState({
         enabled = true,
@@ -481,8 +561,26 @@ function Engine.install(build, data, plugin_path)
         rev = Engine.revision(),
         pending = true,
         attempts = 0,
+        good = good,
     })
-    if not ok then return nil, err end
+    if not ok then
+        if copy then os.remove(copy) end
+        return nil, err
+    end
+    if copy then
+        ok, err = os.rename(copy, Loader.goodPath())
+        if not ok then
+            -- Not kept, then.
+            os.remove(copy)
+            local state = Loader.readState()
+            if state then
+                state.good = nil
+                Loader.writeState(state)
+            end
+        end
+    elseif not good then
+        os.remove(Loader.goodPath())
+    end
     if plugin_path then
         ok, err = Engine.installPatch(plugin_path)
         if not ok then return nil, err end

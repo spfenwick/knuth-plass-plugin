@@ -528,10 +528,15 @@ function KnuthPlass:showRollback()
     local rolled_back = Engine.takeRollback()
     if rolled_back then
         local InfoMessage = require("ui/widget/infomessage")
-        UIManager:show(InfoMessage:new{
+        local text
+        if rolled_back.fallback then
+            text = T(_("The Knuth–Plass engine %1 was turned off, and the previous engine %2 used, because %3."),
+                rolled_back.commit, rolled_back.fallback, rolled_back.reason)
+        else
             text = T(_("The Knuth–Plass engine %1 was turned off, and KOReader's own engine used, because %2."),
-                rolled_back.commit, rolled_back.reason),
-        })
+                rolled_back.commit, rolled_back.reason)
+        end
+        UIManager:show(InfoMessage:new{ text = text })
     end
 end
 
@@ -924,6 +929,16 @@ function KnuthPlass:getDialogButtons()
             end,
         },
     }
+    if Engine.previous() then
+        table.insert(engine_row, {
+            text = _("Roll back"),
+            font_size = NAME_FONT_SIZE,
+            font_bold = false,
+            callback = function()
+                self:confirmRollBack()
+            end,
+        })
+    end
     if Engine.hasStock() then
         table.insert(engine_row, {
             text = _("Restore standard engine"),
@@ -966,6 +981,10 @@ function KnuthPlass:showEngineInfo()
         if not Engine.patchesEnabled() then
             text = text .. " " .. _("User patches are turned off, so it's only loaded when KOReader starts in the file browser.")
         end
+        local previous = Engine.previous()
+        if previous then
+            text = text .. "\n\n" .. T(_("The previous engine, %1, is kept: it's used if this one fails, and \"Roll back\" goes back to it."), previous.commit)
+        end
     end
     if build == "" and supported then
         text = text .. "\n\n" .. _("This engine has the Knuth–Plass settings but doesn't report its build (an early build).")
@@ -987,6 +1006,27 @@ function KnuthPlass:confirmRestoreStock()
             else
                 local InfoMessage = require("ui/widget/infomessage")
                 UIManager:show(InfoMessage:new{ text = T(_("Could not restore the standard engine:\n%1"), err) })
+            end
+        end,
+    })
+end
+
+function KnuthPlass:confirmRollBack()
+    local previous = Engine.previous()
+    if not previous then return end
+    local installed = Engine.installed()
+    local ConfirmBox = require("ui/widget/confirmbox")
+    UIManager:show(ConfirmBox:new{
+        text = T(_("Go back to the previous Knuth–Plass engine, %1? Engine %2 won't be offered again for this KOReader version."),
+            previous.commit, installed and installed.commit or "?"),
+        ok_text = _("Roll back"),
+        ok_callback = function()
+            local ok, err = Engine.rollBack()
+            if ok then
+                UIManager:askForRestart(T(_("The Knuth–Plass engine %1 will be used after KOReader restarts."), previous.commit))
+            else
+                local InfoMessage = require("ui/widget/infomessage")
+                UIManager:show(InfoMessage:new{ text = T(_("Could not roll back the engine:\n%1"), err) })
             end
         end,
     })
@@ -1112,6 +1152,17 @@ function KnuthPlass:fileBrowserMenu()
                 keep_menu_open = true,
                 callback = function()
                     self:showEngineInfo()
+                end,
+            },
+            {
+                text_func = function()
+                    local previous = Engine.previous()
+                    return previous and T(_("Roll back to previous engine (%1)"), previous.commit)
+                        or _("Roll back to previous engine")
+                end,
+                enabled_func = function() return Engine.previous() ~= nil end,
+                callback = function()
+                    self:confirmRollBack()
                 end,
             },
             {

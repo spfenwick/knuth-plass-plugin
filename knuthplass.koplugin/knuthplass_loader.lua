@@ -19,8 +19,10 @@ engine is used, and the plugin offers a matching build.
 Until a book has opened with a newly installed (or re-checked) engine (the
 plugin then clears "pending"), it counts the times the engine is loaded; if
 it fails to load, or is loaded more than max_attempts times (KOReader
-stopped before a book opened with it), it goes back to KOReader's own
-engine and records why.
+stopped before a book opened with it), it goes back to the last engine
+known to work (the plugin keeps a copy when it installs a new one), or else
+KOReader's own engine, and records why. A failed re-check after a KOReader
+update does the same.
 
 Keep it self-contained: it runs before most of KOReader is set up.
 ]]
@@ -56,6 +58,11 @@ function Loader.libPath()
     return Loader.dir() .. "/libkoreader-cre.so"
 end
 
+--- The copy of the last engine known to work (see state.good).
+function Loader.goodPath()
+    return Loader.dir() .. "/libkoreader-cre.good.so"
+end
+
 --- KOReader's own engine.
 function Loader.standardLibPath()
     local lfs = require("libs/libkoreader-lfs")
@@ -79,6 +86,10 @@ end
 --   failed   = why it was turned off (for the plugin to report)
 --   unchecked_rev = a KOReader version it couldn't be checked against
 --                   (not tried again for that version)
+--   good     = the last engine known to work (a book opened with it), kept
+--              at good.lib to go back to: { lib, commit, id, rev }
+--   failed_commit, failed_id = the engine that failed, when it was replaced
+--              by good (commit and id are then good's)
 
 local function serialize(value, indent)
     local t = type(value)
@@ -272,10 +283,44 @@ end
 
 -- Loading -------------------------------------------------------------------
 
+local function exists(path)
+    local file = type(path) == "string" and io.open(path, "rb")
+    if not file then return false end
+    file:close()
+    return true
+end
+
 local function disable(state, reason)
     state.enabled = false
     state.failed = reason
     Loader.writeState(state)
+end
+
+--- Replace the failed engine with the last one known to work, if there's
+-- one; otherwise turn it off.
+-- @return true if it's been replaced
+local function fallBack(state, reason)
+    local good = state.good
+    state.good = nil
+    if type(good) ~= "table" or not exists(good.lib) then
+        disable(state, reason)
+        return false
+    end
+    state.failed = reason
+    state.failed_commit = state.commit
+    state.failed_id = state.id
+    local lib = good.lib
+    if os.rename(lib, Loader.libPath()) then lib = Loader.libPath() end
+    state.enabled = true
+    state.lib = lib
+    state.commit = good.commit
+    state.id = good.id
+    state.rev = good.rev
+    state.pending = nil
+    state.attempts = nil
+    state.unchecked_rev = nil
+    Loader.writeState(state)
+    return true
 end
 
 -- KOReader's own engine: through the loaders after package.preload's (as
@@ -301,13 +346,23 @@ function Loader.loadStandard(name)
     return open()
 end
 
+local loadInstalled
+
+--- The last engine known to work, in place of the failed one, if it's for
+-- this KOReader version (otherwise it's checked at the next start).
+local function loadFallback(state, reason)
+    if fallBack(state, reason) and state.rev == Loader.revision() then
+        return loadInstalled(state)
+    end
+    return nil
+end
+
 --- The engine at state.lib, or nil and why not.
-local function loadInstalled(state)
+loadInstalled = function(state)
     if state.pending then
         state.attempts = (state.attempts or 0) + 1
         if state.attempts > Loader.max_attempts then
-            disable(state, "KOReader stopped before a book opened with it")
-            return nil
+            return loadFallback(state, "KOReader stopped before a book opened with it")
         end
         -- On disk before the engine runs, in case it crashes.
         Loader.writeState(state)
@@ -321,8 +376,7 @@ local function loadInstalled(state)
         end
         err = cre
     end
-    disable(state, "it failed to load: " .. tostring(err))
-    return nil
+    return loadFallback(state, "it failed to load: " .. tostring(err))
 end
 
 --- Load the engine at state.lib, or KOReader's own if that fails (in any
@@ -333,6 +387,7 @@ function Loader.load(name, state)
     if ok and cre ~= nil then return cre end
     if not ok then
         -- An error rather than a failure it reported: turn it off too.
+        -- (Not falling back: what failed may be the fallback.)
         pcall(disable, state, "it failed to load: " .. tostring(cre))
     end
     return Loader.loadStandard(name)
@@ -349,9 +404,7 @@ function Loader.apply()
     if not state or not state.enabled or type(state.lib) ~= "string" then
         return false
     end
-    local file = io.open(state.lib, "rb")
-    if not file then return false end
-    file:close()
+    if not exists(state.lib) then return false end
     -- KOReader was updated (or downgraded): check the engine again.
     local rev = Loader.revision()
     if state.rev ~= rev then
@@ -368,8 +421,9 @@ function Loader.apply()
                 -- KOReader's own engine for now; the plugin can check later.
                 state.unchecked_rev = rev
                 Loader.writeState(state)
-            else
-                disable(state, "after the KOReader update, " .. reason)
+            elseif fallBack(state, "after the KOReader update, " .. reason) then
+                -- (Checked in turn, if it's for another KOReader version.)
+                return Loader.apply()
             end
             return false
         end

@@ -671,7 +671,9 @@ do
     for _i = 1, 3 do assert(start() == data) end
     assert(Loader.readState().attempts == nil)
 
-    -- An engine that fails to load: KOReader's own, at once and from then on.
+    -- An engine that fails to load, with no previous engine to go back to
+    -- (see below): KOReader's own, at once and from then on.
+    assert(Engine.restoreStock())
     b, data = build("bad")
     assert(Engine.install(b, data, plugin_path))
     assert(start() == "standard")
@@ -709,6 +711,7 @@ do
 
     -- One that lacks a function KOReader's own engine has: KOReader's own,
     -- and it isn't offered again for this version.
+    assert(Engine.restoreStock())
     b, data = build("lacking")
     assert(Engine.install(b, data, plugin_path))
     assert(start() == data)
@@ -832,9 +835,102 @@ do
     assert(state.enabled and state.unchecked_rev == koreader_rev and not state.failed)
     ffiutil.runInSubProcess = runInSubProcess
 
+    -- The last engine known to work is kept when a new one is installed…
+    assert(Engine.restoreStock())
+    local good_path = dir .. "/knuthplass/libkoreader-cre.good.so"
+    b, data = build("good")
+    local good_data = data
+    assert(Engine.install(b, data, plugin_path))
+    assert(not read(good_path)) -- (nothing before it)
+    assert(start() == data)
+    -- …once a book has opened with it.
+    b, data = build("second")
+    assert(Engine.install(b, data, plugin_path))
+    assert(not read(good_path) and Engine.previous() == nil)
+    b, data = build("good")
+    assert(Engine.install(b, data, plugin_path))
+    assert(start() == data)
+    Engine.verify("good")
+    b, data = build("second")
+    assert(Engine.install(b, data, plugin_path))
+    assert(read(good_path) == good_data and read(lib) == data)
+    assert(not read(good_path .. ".new"))
+    assert(Engine.previous().commit == "good")
+    -- An unproven one doesn't replace it.
+    b, data = build("third")
+    assert(Engine.install(b, data, plugin_path))
+    assert(Engine.previous().commit == "good" and read(good_path) == good_data)
+    -- Reinstalling the kept one doesn't keep it as its own backup.
+    b, data = build("good")
+    assert(Engine.install(b, data, plugin_path))
+    assert(Engine.previous() == nil and not read(good_path))
+
+    -- A new engine that fails to load: the previous one, at once.
+    assert(start() == good_data)
+    Engine.verify("good")
+    b, data = build("bad")
+    assert(Engine.install(b, data, plugin_path))
+    assert(start() == good_data)
+    state = Loader.readState()
+    assert(state.enabled and state.commit == "good" and not state.pending and state.good == nil)
+    assert(read(lib) == good_data and not read(good_path))
+    rolled_back = Engine.takeRollback()
+    assert(rolled_back.commit == "bad" and rolled_back.fallback == "good")
+    assert(rolled_back.reason:find("FT_Bad", 1, true))
+    assert(Engine.getState().bad["bad/lib-bad.so@" .. koreader_rev])
+    assert(not Engine.getState().bad["good/lib-good.so@" .. koreader_rev])
+    assert(start() == good_data)
+
+    -- KOReader stopping twice before a book opened with it: the previous one.
+    b, data = build("crashy")
+    assert(Engine.install(b, data, plugin_path))
+    assert(start() == data and start() == data)
+    assert(start() == good_data)
+    rolled_back = Engine.takeRollback()
+    assert(rolled_back.commit == "crashy" and rolled_back.fallback == "good")
+
+    -- Failing the re-check after a KOReader update: the previous one, checked
+    -- in turn.
+    Engine.verify("good")
+    b, data = build("lacking")
+    assert(Engine.install(b, data, plugin_path))
+    assert(start() == data)
+    Engine.verify("lacking")
+    koreader_rev = koreader_rev .. "+"
+    assert(start() == good_data)
+    state = Loader.readState()
+    assert(state.commit == "good" and state.rev == koreader_rev and state.pending)
+    rolled_back = Engine.takeRollback()
+    assert(rolled_back.commit == "lacking" and rolled_back.fallback == "good")
+    assert(rolled_back.reason:find("cre.getVersion", 1, true))
+    Engine.verify("good")
+
+    -- Rolling back by hand: the previous one from the next start, and the
+    -- installed one not offered again.
+    b, data = build("second")
+    assert(Engine.install(b, data, plugin_path))
+    assert(start() == data)
+    Engine.verify("second")
+    assert(Engine.previous().commit == "good")
+    assert(Engine.rollBack())
+    state = Loader.readState()
+    assert(state.enabled and state.commit == "good" and not state.pending and state.good == nil)
+    assert(read(lib) == good_data and not read(good_path))
+    assert(Engine.getState().bad["second/lib-second.so@" .. koreader_rev])
+    assert(start() == good_data)
+    local ok, err = Engine.rollBack()
+    assert(not ok and err)
+
+    -- Restoring KOReader's engine removes the kept one too.
+    b, data = build("second")
+    assert(Engine.install(b, data, plugin_path))
+    assert(read(good_path))
+    assert(Engine.restoreStock())
+    assert(not read(good_path) and not read(lib))
+
     -- The plugin's check before installing is the same comparison.
     assert(Engine.checkCompatible("\127ELF good"))
-    local ok, err = Engine.checkCompatible("\127ELF lacking")
+    ok, err = Engine.checkCompatible("\127ELF lacking")
     assert(not ok and err:find("cre.getVersion", 1, true), err)
     ok, err = Engine.checkCompatible("\127ELF bad")
     assert(not ok and err:find("FT_Bad", 1, true), err)
@@ -892,7 +988,8 @@ do
     assert(#modes == 3 and modes[2].checked_func() and not modes[3].checked_func())
     modes[3].callback()
     assert(items[2].text_func() == "Automatic updates: install" and modes[3].checked_func())
-    assert(items[4].text == "Restore standard engine" and not items[4].enabled_func())
+    assert(items[4].text_func() == "Roll back to previous engine" and not items[4].enabled_func())
+    assert(items[5].text == "Restore standard engine" and not items[5].enabled_func())
     -- A PDF in the reader: no entry.
     registered = false
     Plugin:new{ ui = { document = {}, menu = { registerToMainMenu = function() registered = true end } } }

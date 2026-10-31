@@ -165,19 +165,28 @@ device uses. (A Kindle Voyage uses `kindlepw2`; a Paperwhite 11 on firmware
 `$KO_HOME/knuthplass/` when `KO_HOME` is set), and a user patch
   the plugin installs, `patches/1-knuthplass-engine.lua`, makes KOReader
   load it from there. It runs at the very start, before anything uses the
-  engine. "Restore standard engine" (Tools menu or dialog) removes both.
+  engine. "Restore standard engine" (Tools menu or dialog) removes them
+  (and the previous engine, below).
   (If user patches are turned off, the plugin sets this up as it loads,
   which is in time only when KOReader starts in the file browser.)
+- When a new engine is installed, the one it replaces is kept
+  (`knuthplass/libkoreader-cre.good.so`) if a book has opened with it, so
+  there's always a last known good engine to go back to. "Roll back to
+  previous engine" (Tools menu, or "Roll back" in the dialog) switches to
+  it from the next start, and the engine it replaces isn't offered again
+  for this KOReader version.
 - Until a book has opened with a new engine, the patch counts the times
   it's loaded. If it fails to load, or KOReader stops twice before a book
-  opened with it, KOReader's own engine is used from then on, and that
-  build isn't offered again for this KOReader version.
+  opened with it, the previous engine is used from then on (or KOReader's
+  own, if there isn't one), and that build isn't offered again for this
+  KOReader version.
 - After a KOReader update, the patch checks the engine again on the first
   start, in separate processes: it must load with the new version, and have
   every function KOReader's own engine has (which matches KOReader's Lua
   code). If it does, it's kept, and counted again until a book has opened
-  with it. If it doesn't, KOReader's own engine is used, and "Check for
-  updates" offers a matching build. (If KOReader's own engine can't be
+  with it. If it doesn't, the previous engine is used if it passes the same
+  check, otherwise KOReader's own, and "Check for updates" offers a matching
+  build. (If KOReader's own engine can't be
   checked, KOReader's own is used for that version, and "Check for updates"
   checks and reinstates the engine without downloading it again.)
 - Versions before 0.4.0 replaced `libs/libkoreader-cre.so`. On the first
