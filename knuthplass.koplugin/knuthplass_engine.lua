@@ -24,7 +24,7 @@ local T = require("ffi/util").template
 local Loader = require("knuthplass_loader")
 
 local Engine = {
-    manifest_url = "https://github.com/spfenwick/knuth-plass-plugin/releases/download/engine/manifest.json",
+    manifest_url = "https://github.com/spfenwick/koreader-stuff/releases/download/engine/manifest.json",
     base_api_url = "https://api.github.com/repos/koreader/koreader/contents/base?ref=%1",
     settings_key = "knuthplass_engine",
     build_property = "crengine.knuth.plass.build",

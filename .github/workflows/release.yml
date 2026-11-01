@@ -4,11 +4,13 @@
 # - by hand (Actions → Release plugin → Run workflow, on main), which tags
 #   the commit with the version in _meta.lua.
 #
-# The release becomes "latest", so the updater finds its plugin.json at
+# The zip goes on the versioned release, and its plugin.json is also put on
+# the rolling "knuthplass" release, where the updater finds it at
 #
-#   https://github.com/<repo>/releases/latest/download/plugin.json
+#   https://github.com/<repo>/releases/download/knuthplass/plugin.json
 #
-# (The "engine" release is a prerelease, so it never counts as latest.)
+# (A fixed tag, so other releases in this repo can't hide it the way they
+# could with "latest". Like "engine", it is a prerelease.)
 name: Release plugin
 
 on:
@@ -87,3 +89,16 @@ jobs:
           gh release create "$TAG" -R "$GITHUB_REPOSITORY" --latest --target "$GITHUB_SHA" \
             --title "Knuth–Plass justification $VERSION" --generate-notes \
             out/knuthplass.koplugin.zip out/plugin.json
+
+      # Last, so the updater only sees plugin.json once the zip is up.
+      - name: Point updater at it
+        env:
+          UPDATE_TAG: knuthplass
+        run: |
+          set -euo pipefail
+          if ! gh release view "$UPDATE_TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$UPDATE_TAG" -R "$GITHUB_REPOSITORY" --prerelease --latest=false \
+              --target "$GITHUB_SHA" --title "Knuth–Plass justification updates" \
+              --notes "plugin.json for the plugin's updater; points at the newest vX.Y.Z release."
+          fi
+          gh release upload "$UPDATE_TAG" -R "$GITHUB_REPOSITORY" --clobber out/plugin.json

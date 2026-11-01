@@ -20,7 +20,8 @@ local T = require("ffi/util").template
 local Engine = require("knuthplass_engine")
 
 local Updater = {
-    repo = "spfenwick/knuth-plass-plugin",
+    repo = "spfenwick/koreader-stuff",
+    release_tag = "knuthplass", -- rolling release holding plugin.json
     settings_key = "knuthplass_updates",
     check_interval = 24 * 60 * 60, -- automatic checks, seconds
     max_manifest_size = 64 * 1024,
@@ -147,9 +148,9 @@ function Updater.fetch(url, max_size)
     return body, err
 end
 
---- The latest release's plugin.json, or nil and an error message.
+--- The newest release's plugin.json, or nil and an error message.
 function Updater.fetchManifest()
-    local url = T("https://github.com/%1/releases/latest/download/plugin.json", Updater.repo)
+    local url = T("https://github.com/%1/releases/download/%2/plugin.json", Updater.repo, Updater.release_tag)
     local body, err = Updater.fetch(url, Updater.max_manifest_size)
     if not body then return nil, err end
     local json = require("json")
