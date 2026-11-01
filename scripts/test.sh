@@ -17,5 +17,9 @@ cd "$repo_dir"
     knuthplass.koplugin/main.lua \
     knuthplass.koplugin/knuthplass_updater.lua \
     knuthplass.koplugin/knuthplass_engine.lua \
-    knuthplass.koplugin/knuthplass_loader.lua
+    knuthplass.koplugin/knuthplass_loader.lua \
+    rclonesync.koplugin/_meta.lua \
+    rclonesync.koplugin/main.lua \
+    rclonesync.koplugin/rclonesync_sync.lua
 "$lua_bin" tests/test_plugin.lua
+"$lua_bin" tests/test_rclonesync.lua
