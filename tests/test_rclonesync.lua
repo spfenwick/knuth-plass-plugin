@@ -83,6 +83,9 @@ write(A.kodir .. "/patches/1-knuthplass-engine.lua", "-- device A's\n")
 write(A.kodir .. "/fonts/a.ttf", "font a\n")
 write(A.kodir .. "/data/dict/d.ifo", "dict\n")
 write(A.kodir .. "/icons/i.svg", "<svg/>\n")
+write(A.rclone_dir .. "/plugins.txt", "/shared.koplugin/**\n")
+write(A.kodir .. "/plugins/shared.koplugin/main.lua", "-- shared\n")
+write(A.kodir .. "/plugins/big.koplugin/main.lua", "-- big\n")
 write(A.kodir .. "/styletweaks/t.css", "p {}\n")
 
 -- Context
@@ -98,7 +101,7 @@ check(assert(Sync.context({ root = opts.root })).remote == "Local", "first remot
 -- Jobs
 local names = {}
 for _, j in ipairs(Sync.jobs("push", false)) do table.insert(names, j.name) end
-check(table.concat(names, ",") == "list,settings,patches,icons,dict,styletweaks", "push skips fonts")
+check(table.concat(names, ",") == "list,settings,plugins,patches,dict,styletweaks", "push skips fonts")
 names = {}
 for _, j in ipairs(Sync.jobs("pull", true)) do table.insert(names, j.name) end
 check(table.concat(names, ",") == "list,styletweaks", "tweaks only")
@@ -115,7 +118,11 @@ check(exists(remote .. "/patches/2-mine.lua"), "patches pushed")
 check(not exists(remote .. "/patches/1-knuthplass-engine.lua"), "Knuth–Plass patch not pushed")
 check(not exists(remote .. "/fonts"), "fonts not pushed")
 check(exists(remote .. "/rclone/settings.txt"), "list pushed")
-check(exists(remote .. "/dict/d.ifo") and exists(remote .. "/icons/i.svg"), "dict and icons pushed")
+check(exists(remote .. "/dict/d.ifo"), "dict pushed")
+check(not exists(remote .. "/icons"), "icons not synced")
+check(exists(remote .. "/rclone/plugins.txt"), "plugin list pushed")
+check(exists(remote .. "/plugins/shared.koplugin/main.lua"), "listed plugin pushed")
+check(not exists(remote .. "/plugins/big.koplugin"), "unlisted plugin not pushed")
 
 -- Fonts only ever go down: put some on the remote.
 write(remote .. "/fonts/shared.ttf", "shared\n")
@@ -124,6 +131,7 @@ write(remote .. "/fonts/shared.ttf", "shared\n")
 current = B
 write(B.kodir .. "/patches/1-knuthplass-engine.lua", "-- device B's\n")
 write(B.kodir .. "/settings/gestures.lua", "return { b = 2 }\n")
+write(B.kodir .. "/plugins/own.koplugin/main.lua", "-- B's own\n")
 local bctx = assert(Sync.context(opts))
 check(not Sync.isPending(bctx), "nothing pending at first")
 result, out = run(bctx, "pull", false)
@@ -135,6 +143,10 @@ check(read(B.kodir .. "/settings/gestures.lua") == "return { b = 2 }\n", "settin
 check(exists(B.kodir .. "/fonts/shared.ttf"), "fonts pulled")
 check(read(B.kodir .. "/patches/1-knuthplass-engine.lua") == "-- device B's\n", "own Knuth–Plass patch kept")
 check(exists(B.kodir .. "/patches/2-mine.lua"), "patches pulled")
+check(exists(B.rclone_dir .. "/plugins.txt"), "plugin list pulled")
+check(read(B.kodir .. "/plugins/shared.koplugin/main.lua") == "-- shared\n", "listed plugin pulled")
+check(read(B.kodir .. "/plugins/own.koplugin/main.lua") == "-- B's own\n", "unlisted plugin kept")
+check(not exists(B.kodir .. "/icons"), "icons not pulled")
 
 -- Put the staged settings in place, as at the next start.
 Sync.setPending(bctx)
@@ -180,10 +192,21 @@ check(read(remote .. "/styletweaks/t.css") == "p {}\n", "dry run changes nothing
 bctx.dry_run = false
 
 -- A missing folder is skipped on push, not mirrored as empty.
-os.execute("rm -rf " .. q(B.kodir .. "/icons"))
+os.execute("rm -rf " .. q(B.kodir .. "/data/dict"))
 result, out = run(bctx, "push", false)
-check(result.jobs.icons.skipped == "no folder", "missing folder skipped\n" .. out)
-check(exists(remote .. "/icons/i.svg"), "remote icons kept")
+check(result.jobs.dict.skipped == "no folder", "missing folder skipped\n" .. out)
+check(exists(remote .. "/dict/d.ifo"), "remote dict kept")
+
+-- No plugins.txt: plugins skipped, the rest still runs.
+local D = device("d")
+current = D
+write(D.rclone_dir .. "/settings.txt", "/settings/gestures.lua\n")
+write(D.kodir .. "/settings/gestures.lua", "return {}\n")
+local dctx = assert(Sync.context({ remote = "Local", root = cloud .. "/other" }))
+result, out = run(dctx, "push", false)
+check(not result.failed and result.jobs.plugins.skipped == "no plugins.txt", "no plugin list: skipped\n" .. out)
+check(exists(cloud .. "/other/settings/settings/gestures.lua"), "settings still pushed")
+current = B
 
 -- A failing remote is reported.
 local bad = assert(Sync.context({ remote = "Missing", root = opts.root }))

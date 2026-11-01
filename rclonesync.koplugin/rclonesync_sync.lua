@@ -6,10 +6,11 @@ The remote keeps the layout the PushSettings.sh/PullSettings.sh scripts
 used, so devices still on the scripts stay in step:
 
     <remote>:<root>/rclone/settings.txt   the list of settings files
-    <remote>:<root>/settings/             those files
+    <remote>:<root>/rclone/plugins.txt    the list of plugins
+    <remote>:<root>/settings/             the files settings.txt lists
+    <remote>:<root>/plugins/              the plugins plugins.txt lists
     <remote>:<root>/fonts/                pulled only
     <remote>:<root>/patches/
-    <remote>:<root>/icons/
     <remote>:<root>/dict/                 KOReader's data/dict
     <remote>:<root>/styletweaks/
 
@@ -21,24 +22,23 @@ next time KOReader starts, before any plugin has read them.
 
 local Sync = {}
 
-local LIST_FILE = "settings.txt"
-
 -- In the order they run: the list first, so a pull uses the new one.
 --   dir:       under KOReader's folder ("" for the folder itself)
 --   in_rclone: under the rclone folder instead
+--   list:      only what this file in the rclone folder lists
 --   tweaks:    also part of "style tweaks only"
 --   pull_only: never pushed (fonts installed on one device stay there)
 --   staged:    pulled into the staging folder (see above)
 --   restart:   KOReader uses the files only after a restart
 Sync.JOBS = {
     { name = "list", in_rclone = true, dir = "", remote = "rclone", tweaks = true,
-      filter = { "--include", "/" .. LIST_FILE } },
-    { name = "settings", dir = "", remote = "settings", include_list = true, staged = true },
+      filter = { "--include", "/settings.txt", "--include", "/plugins.txt" } },
+    { name = "settings", dir = "", remote = "settings", list = "settings.txt", staged = true },
+    { name = "plugins", dir = "plugins", remote = "plugins", list = "plugins.txt", restart = true },
     { name = "fonts", dir = "fonts", remote = "fonts", pull_only = true, restart = true },
     -- The Knuth–Plass plugin writes this patch for each device itself.
     { name = "patches", dir = "patches", remote = "patches", restart = true,
       filter = { "--exclude", "/1-knuthplass-engine.lua" } },
-    { name = "icons", dir = "icons", remote = "icons", restart = true },
     { name = "dict", dir = "data/dict", remote = "dict", restart = true },
     { name = "styletweaks", dir = "styletweaks", remote = "styletweaks", tweaks = true },
 }
@@ -174,7 +174,8 @@ function Sync.remotes(ctx)
     return names
 end
 
-function Sync.listPath(ctx) return ctx.rclone_dir .. "/" .. LIST_FILE end
+--- A list in the rclone folder (settings.txt by default).
+function Sync.listPath(ctx, name) return ctx.rclone_dir .. "/" .. (name or "settings.txt") end
 function Sync.stagingDir(ctx) return ctx.state_dir .. "/staging" end
 function Sync.pendingPath(ctx) return ctx.state_dir .. "/pending" end
 function Sync.logPath(ctx) return ctx.state_dir .. "/last.log" end
@@ -252,8 +253,8 @@ end
 local function filterArgs(ctx, job)
     local args = {}
     for _, arg in ipairs(job.filter or {}) do table.insert(args, q(arg)) end
-    if job.include_list then
-        table.insert(args, "--include-from " .. q(Sync.listPath(ctx)))
+    if job.list then
+        table.insert(args, "--include-from " .. q(Sync.listPath(ctx, job.list)))
     end
     return table.concat(args, " ")
 end
@@ -296,8 +297,8 @@ function Sync.script(ctx, direction, tweaks_only)
                 .. " >/dev/null 2>&1 || echo '@@differ " .. job.name .. "'"
         end
         local conditions = {}
-        if job.include_list then
-            table.insert(conditions, { "-f " .. q(Sync.listPath(ctx)), "no " .. LIST_FILE })
+        if job.list then
+            table.insert(conditions, { "-f " .. q(Sync.listPath(ctx, job.list)), "no " .. job.list })
         end
         if direction == "push" then
             -- An empty source would empty the remote.
